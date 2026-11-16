@@ -16,6 +16,7 @@ All notable changes to this project are documented here. The format follows
 - `OMP_HERDR_PANES_AUTO_CLOSE=0` keeps finished panes open until manually closed or omp exits.
 - `t` toggles all thinking blocks and sets the default for new thinking.
 - `/herdr-panes` controls pane creation and automatic close delays in the current OMP process.
+- `/herdr-panes` offers argument completion and shows usage alongside the current settings.
 - Show the resolved model on a color-coded status line and follow default/fallback model changes.
 
 ### Changed

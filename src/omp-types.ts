@@ -17,6 +17,7 @@ export interface ExtensionAPI {
 	logger: OmpLogger;
 	registerCommand(name: string, options: {
 		description: string;
+		getArgumentCompletions?: (argumentPrefix: string) => Array<{ value: string; label: string; description?: string }> | null;
 		handler: (args: string, ctx: { ui: { notify(message: string, type: "info" | "error"): void } }) => void | Promise<void>;
 	}): void;
 	on(

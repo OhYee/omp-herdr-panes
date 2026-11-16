@@ -89,7 +89,9 @@ unpersisted live events unless launched by the plugin with its private event con
 ## Configuration
 
 In an OMP session running inside Herdr, use `/herdr-panes` to inspect and change the current
-process's settings without restarting:
+process's settings without restarting. Type `/herdr-panes ` and use the completion menu to
+discover the available options; press Tab to select one. Run `/herdr-panes` without arguments to
+see the current settings and a usage hint.
 
 ```text
 /herdr-panes                         # show current settings

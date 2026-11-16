@@ -14,7 +14,7 @@
  */
 
 import { fileURLToPath } from "node:url";
-import { handlePaneCommand, type PaneSettings } from "./command.ts";
+import { completePaneCommand, handlePaneCommand, type PaneSettings } from "./command.ts";
 import { parseLifecycle, readConfig, shellQuote } from "./config.ts";
 import { createHerdrCli } from "./herdr.ts";
 import { LiveBridge } from "./live-bridge.ts";
@@ -123,6 +123,7 @@ export default function ompHerdrPanes(pi: ExtensionAPI): void {
 		const currentManager = manager;
 		pi.registerCommand("herdr-panes", {
 			description: "Control subagent panes and automatic closing",
+			getArgumentCompletions: completePaneCommand,
 			handler: (args, ctx) => {
 				const result = handlePaneCommand(args, currentSettings, currentManager);
 				ctx.ui.notify(result.message, result.type);

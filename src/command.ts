@@ -12,11 +12,30 @@ interface CommandResult { message: string; type: "info" | "error" }
 const USAGE = "Usage: /herdr-panes [status|enabled|disabled|auto-close <enabled|disabled|seconds>]";
 const MAX_DELAY_MS = 2_147_483_647;
 
+const COMMAND_OPTIONS = [
+	{ value: "status", label: "status", description: "Show settings and usage" },
+	{ value: "enabled", label: "enabled", description: "Allow new panes" },
+	{ value: "disabled", label: "disabled", description: "Stop opening new panes" },
+	{ value: "auto-close", label: "auto-close", description: "Configure automatic closing" },
+];
+const AUTO_CLOSE_OPTIONS = [
+	{ value: "enabled", label: "enabled", description: "Use the current delays" },
+	{ value: "disabled", label: "disabled", description: "Keep finished panes open" },
+];
+
+export function completePaneCommand(prefix: string): typeof COMMAND_OPTIONS | null {
+	const subcommand = /^(auto-close\s+)(\S*)$/u.exec(prefix);
+	const options = subcommand ? AUTO_CLOSE_OPTIONS : COMMAND_OPTIONS;
+	const matches = options.filter((option) => option.value.startsWith(subcommand ? (subcommand[2] ?? "") : prefix));
+	if (!matches.length) return null;
+	return subcommand ? matches.map((option) => ({ ...option, value: subcommand[1] + option.value })) : matches;
+}
+
 /** Change the current process's pane policy; no settings are written to disk. */
 export function handlePaneCommand(args: string, settings: PaneSettings, manager: Pick<PaneManager, "setClosePolicy" | "setEnabled">): CommandResult {
 	const words = args.trim() ? args.trim().split(/\s+/u) : [];
 	if (words.length === 0 || (words.length === 1 && words[0] === "status")) {
-		return { message: `herdr-panes: ${settings.enabled ? "enabled" : "disabled"}; auto-close ${settings.autoClose ? "enabled" : "disabled"}; success ${settings.closeDelayMs / 1000}s; failure ${settings.failCloseDelayMs / 1000}s (current process only)`, type: "info" };
+		return { message: `herdr-panes: ${settings.enabled ? "enabled" : "disabled"}; auto-close ${settings.autoClose ? "enabled" : "disabled"}; success ${settings.closeDelayMs / 1000}s; failure ${settings.failCloseDelayMs / 1000}s (current process only)\n${USAGE}\nUse auto-close <seconds> to set both delays; settings reset on restart.`, type: "info" };
 	}
 	if (words.length === 1 && (words[0] === "enabled" || words[0] === "disabled")) {
 		settings.enabled = words[0] === "enabled";

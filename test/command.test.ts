@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { handlePaneCommand, type PaneSettings } from "../src/command.ts";
+import { completePaneCommand, handlePaneCommand, type PaneSettings } from "../src/command.ts";
 import type { PaneManagerConfig } from "../src/pane-manager.ts";
 
 function fixture() {
@@ -49,4 +49,14 @@ test("malformed and out-of-range commands cannot mutate settings", () => {
 		expect(h.settings).toEqual(original);
 	}
 	expect(h.applied).toEqual([]);
+});
+
+test("command completion discovers options and completes auto-close arguments", () => {
+	expect(completePaneCommand("")?.map((item) => item.value)).toEqual(["status", "enabled", "disabled", "auto-close"]);
+	expect(completePaneCommand("en")?.map((item) => item.value)).toEqual(["enabled"]);
+	expect(completePaneCommand("auto-close ")?.map((item) => item.value)).toEqual(["auto-close enabled", "auto-close disabled"]);
+	expect(completePaneCommand("auto-close  dis")?.map((item) => item.value)).toEqual(["auto-close  disabled"]);
+	expect(completePaneCommand("auto-close 5")).toBeNull();
+	expect(completePaneCommand("disabled extra")).toBeNull();
+	expect(fixture().run("").message).toContain("Usage: /herdr-panes");
 });
