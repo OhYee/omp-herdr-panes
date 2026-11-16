@@ -87,11 +87,30 @@ unpersisted live events unless launched by the plugin with its private event con
 
 ## Configuration
 
+In an OMP session running inside Herdr, use `/herdr-panes` to inspect and change the current
+process's settings without restarting:
+
+```text
+/herdr-panes                         # show current settings
+/herdr-panes disabled                # stop opening new panes
+/herdr-panes enabled                 # allow new panes again
+/herdr-panes auto-close disabled     # keep completed panes open
+/herdr-panes auto-close enabled      # re-enable the current delays
+/herdr-panes auto-close 5            # close after 5 seconds for either outcome
+```
+
+Numeric delays are in seconds and also enable auto-close. Changes are process-local: after an
+OMP restart, environment variables determine the initial values again. Disabling pane creation
+leaves existing panes open and drops queued pane requests. Changing auto-close applies to already
+finished panes too, counting from when each subagent finished; an expired delay closes immediately.
+
+### Startup environment
+
 Set these environment variables before starting omp. They are read once, when the extension loads.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `OMP_HERDR_PANES` | `1` | `0` turns the extension off |
+| `OMP_HERDR_PANES` | `1` | `0` starts with pane creation disabled; `/herdr-panes enabled` can turn it on |
 | `OMP_HERDR_PANES_AUTO_CLOSE` | `1` | `0` keeps finished panes open until manually closed or omp exits |
 | `OMP_HERDR_PANES_RATIO` | `0.6` | share of the width kept by the omp pane when the column opens (`0.2`–`0.9`) |
 | `OMP_HERDR_PANES_CLOSE_DELAY_MS` | `3000` | how long a pane stays open after its subagent completes |
@@ -168,6 +187,7 @@ bun test                    # run the tests
 | --- | --- |
 | `src/index.ts` | extension entry: connects lifecycle and streaming events |
 | `src/config.ts` | env-var config, lifecycle payload parsing, shell quoting |
+| `src/command.ts` | runtime `/herdr-panes` command parsing and status |
 | `src/pane-manager.ts` | stacked-pane layout, serialized herdr calls, delayed close |
 | `src/herdr.ts` | thin, typed wrapper around the `herdr` CLI |
 | `src/viewer.ts` | viewer process, transcript tailing and live socket client |

@@ -39,6 +39,7 @@ interface Entry {
 	done: boolean;
 	/** Terminal lifecycle status (`completed`, `failed`, `aborted`, …) once done. */
 	status?: string;
+	finishedAt?: number;
 	closeGeneration?: number;
 	timer?: { cancel(): void };
 }
@@ -53,6 +54,7 @@ export class PaneManager {
 	readonly #config: PaneManagerConfig;
 	readonly #logger: Log;
 	readonly #schedule: Schedule;
+	readonly #now: () => number;
 	readonly #entries = new Map<string, Entry>();
 	/** Subagents that started while every slot was taken: key → label, in arrival order. */
 	readonly #waiting = new Map<string, string>();
@@ -61,11 +63,13 @@ export class PaneManager {
 	#nextOrder = 0;
 	#reconcileTimer?: { cancel(): void };
 	#reconcileGeneration = 0;
+	#enabled = true;
 
-	constructor(herdr: Herdr, config: PaneManagerConfig, log: Log, schedule?: Schedule) {
+	constructor(herdr: Herdr, config: PaneManagerConfig, log: Log, schedule?: Schedule, now: () => number = Date.now) {
 		this.#herdr = herdr;
 		this.#config = config;
 		this.#logger = log;
+		this.#now = now;
 		this.#schedule =
 			schedule ??
 			defaultSchedule((message, context) => {
@@ -84,6 +88,7 @@ export class PaneManager {
 			this.#cancelTimer(existing);
 			existing.closeGeneration = (existing.closeGeneration ?? 0) + 1;
 			existing.done = false;
+			existing.finishedAt = undefined;
 			if (existing.status !== undefined) {
 				existing.status = undefined;
 				const paneId = existing.paneId;
@@ -91,6 +96,7 @@ export class PaneManager {
 			}
 			return this.#queue;
 		}
+		if (!this.#enabled) return Promise.resolve();
 		if (this.#waiting.has(key)) return Promise.resolve();
 		if (this.#entries.size >= this.#config.maxPanes) {
 			this.#log("pane limit reached, waiting for a free slot", { key });
@@ -116,6 +122,7 @@ export class PaneManager {
 		}
 		const entry = this.#entries.get(key);
 		if (entry === undefined) return;
+		if (!entry.done) entry.finishedAt = this.#now();
 		entry.done = true;
 		entry.status = status;
 		// No pane yet: open's job applies the title and schedules the close once the split returns.
@@ -123,6 +130,34 @@ export class PaneManager {
 		if (paneId === undefined) return;
 		void this.#enqueue(() => this.#rename(key, paneId, entry));
 		this.#scheduleClose(key, entry);
+	}
+
+	/** Apply a runtime close policy to already-finished and future panes. */
+	setClosePolicy(policy: Pick<PaneManagerConfig, "autoClose" | "closeDelayMs" | "failCloseDelayMs">): void {
+		this.#config.autoClose = policy.autoClose;
+		this.#config.closeDelayMs = policy.closeDelayMs;
+		this.#config.failCloseDelayMs = policy.failCloseDelayMs;
+		for (const [key, entry] of this.#entries) {
+			if (!entry.done) continue;
+			this.#cancelTimer(entry);
+			entry.closeGeneration = (entry.closeGeneration ?? 0) + 1;
+			if (entry.paneId !== undefined) this.#scheduleClose(key, entry);
+		}
+		if (policy.autoClose === false) this.#scheduleReconcile();
+		else this.#cancelReconcile();
+	}
+
+	/** Disable new panes without closing panes that already exist. */
+	setEnabled(enabled: boolean): void {
+		this.#enabled = enabled;
+		if (!enabled) {
+			this.#waiting.clear();
+			this.#cancelReconcile();
+		}
+	}
+
+	has(key: string): boolean {
+		return this.#entries.has(key);
 	}
 
 	/** Close every pane now and cancel pending timers. Never rejects. */
@@ -223,7 +258,9 @@ export class PaneManager {
 	#scheduleClose(key: string, entry: Entry): void {
 		if (this.#config.autoClose === false) return;
 		if (entry.timer !== undefined) return;
-		const delay = entry.status === "completed" ? this.#config.closeDelayMs : this.#config.failCloseDelayMs;
+		const configured = entry.status === "completed" ? this.#config.closeDelayMs : this.#config.failCloseDelayMs;
+		const elapsed = entry.finishedAt === undefined ? 0 : Math.max(0, this.#now() - entry.finishedAt);
+		const delay = Math.max(0, configured - elapsed);
 		const generation = entry.closeGeneration;
 		const timer = this.#schedule(() => {
 			if (entry.timer !== timer) return;

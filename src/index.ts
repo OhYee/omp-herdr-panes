@@ -14,6 +14,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+import { handlePaneCommand, type PaneSettings } from "./command.ts";
 import { parseLifecycle, readConfig, shellQuote } from "./config.ts";
 import { createHerdrCli } from "./herdr.ts";
 import { LiveBridge } from "./live-bridge.ts";
@@ -28,6 +29,7 @@ const VIEWER_PATH = fileURLToPath(new URL("./viewer.ts", import.meta.url));
 let manager: PaneManager | undefined;
 let bridge: LiveBridge | undefined;
 let liveEvents: LiveEvents | undefined;
+let settings: PaneSettings | undefined;
 const viewerTokens = new Map<string, { token: string }>();
 /** True once some factory call in this process claimed ownership (the first one is the parent). */
 let ownerClaimed = false;
@@ -35,7 +37,7 @@ let ownerClaimed = false;
 const subscriptions = new Map<OmpEventBus, () => void>();
 
 export default function ompHerdrPanes(pi: ExtensionAPI): void {
-	const config = readConfig(process.env);
+	const config = readConfig(process.env, true);
 	if (config === null) return;
 
 	const bun = Bun.which("bun");
@@ -46,6 +48,7 @@ export default function ompHerdrPanes(pi: ExtensionAPI): void {
 
 	const isOwner = !ownerClaimed;
 	ownerClaimed = true;
+	settings ??= { enabled: process.env.OMP_HERDR_PANES !== "0", autoClose: config.autoClose, closeDelayMs: config.closeDelayMs, failCloseDelayMs: config.failCloseDelayMs };
 
 	if (!bridge) {
 		try {
@@ -74,6 +77,7 @@ export default function ompHerdrPanes(pi: ExtensionAPI): void {
 			pi.logger.warn(`herdr-panes: ${message}`, context);
 		},
 	);
+	if (isOwner && !settings.enabled) manager.setEnabled(false);
 
 	if (!subscriptions.has(pi.events)) {
 		const unsubscribe = pi.events.on("task:subagent:lifecycle", (data) => {
@@ -81,6 +85,7 @@ export default function ompHerdrPanes(pi: ExtensionAPI): void {
 				const event = parseLifecycle(data);
 				if (event === null) return;
 				if (event.status === "started") {
+					if (!settings?.enabled && !manager?.has(event.sessionFile)) return;
 					if (bridge) {
 						try {
 							const token = bridge.register(event.id);
@@ -114,6 +119,15 @@ export default function ompHerdrPanes(pi: ExtensionAPI): void {
 	}
 
 	if (isOwner) {
+		const currentSettings = settings;
+		const currentManager = manager;
+		pi.registerCommand("herdr-panes", {
+			description: "Control subagent panes and automatic closing",
+			handler: (args, ctx) => {
+				const result = handlePaneCommand(args, currentSettings, currentManager);
+				ctx.ui.notify(result.message, result.type);
+			},
+		});
 		pi.on("session_shutdown", async () => {
 			for (const unsubscribe of subscriptions.values()) unsubscribe();
 			subscriptions.clear();
@@ -124,6 +138,7 @@ export default function ompHerdrPanes(pi: ExtensionAPI): void {
 			viewerTokens.clear();
 			await manager?.closeAll();
 			manager = undefined;
+			settings = undefined;
 			ownerClaimed = false;
 		});
 	}

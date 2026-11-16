@@ -112,12 +112,14 @@ interface Harness {
 	timers: FakeTimer[];
 	logs: LogEntry[];
 	pm: PaneManager;
+	advance(ms: number): void;
 }
 
 function harness(options: FakeHerdrOptions & { maxPanes?: number; autoClose?: boolean } = {}): Harness {
 	const herdr = fakeHerdr(options);
 	const { schedule, timers } = fakeSchedule();
 	const logs: LogEntry[] = [];
+	let now = 0;
 	const pm = new PaneManager(
 		herdr,
 		{
@@ -131,8 +133,9 @@ function harness(options: FakeHerdrOptions & { maxPanes?: number; autoClose?: bo
 		},
 		(message, context) => logs.push(context === undefined ? { message } : { message, context }),
 		schedule,
+		() => now,
 	);
-	return { herdr, timers, logs, pm };
+	return { herdr, timers, logs, pm, advance: (ms) => { now += ms; } };
 }
 
 /** The n-th registered fake timer; fails the test when the manager scheduled none. */
@@ -482,4 +485,96 @@ test("an already manually closed pane is not logged as a close failure", async (
 	h.herdr.close = async () => { throw new HerdrError("pane_not_found", "gone"); };
 	await h.pm.closeAll();
 	expect(h.logs).toEqual([]);
+});
+
+test("changing auto-close cancels stale closes and preserves elapsed finish time", async () => {
+	const h = harness();
+	await h.pm.open(file("A"), "agent A");
+	h.pm.finish(file("A"), "completed");
+	const original = timer(h);
+	h.advance(400);
+	h.pm.setClosePolicy({ autoClose: false, closeDelayMs: 1000, failCloseDelayMs: 5000 });
+	expect(original.cancelled).toBe(true);
+	original.fire();
+	await settle();
+	expect(callsMatching(h, "close ")).toEqual([]);
+	h.advance(300);
+	h.pm.setClosePolicy({ autoClose: true, closeDelayMs: 1000, failCloseDelayMs: 5000 });
+	expect(timer(h, 1).ms).toBe(300);
+	timer(h, 1).fire();
+	await settle();
+	expect(callsMatching(h, "close ")).toEqual(["close w1:p2"]);
+});
+
+test("disabling auto-close invalidates a close already queued by a timer", async () => {
+	const h = harness({ ticks: 4 });
+	await h.pm.open(file("A"), "agent A");
+	h.pm.finish(file("A"), "completed");
+	timer(h).fire();
+	h.pm.setClosePolicy({ autoClose: false, closeDelayMs: 1000, failCloseDelayMs: 5000 });
+	await settle();
+	expect(callsMatching(h, "close ")).toEqual([]);
+	expect(h.pm.size).toBe(1);
+});
+
+test("changing delays recalculates each finished pane from its own finish time", async () => {
+	const h = harness();
+	await h.pm.open(file("A"), "agent A");
+	await h.pm.open(file("B"), "agent B");
+	h.pm.finish(file("A"), "completed");
+	h.advance(600);
+	h.pm.finish(file("B"), "failed");
+	h.pm.setClosePolicy({ autoClose: true, closeDelayMs: 500, failCloseDelayMs: 2000 });
+	expect(timer(h, 0).cancelled).toBe(true);
+	expect(timer(h, 1).cancelled).toBe(true);
+	expect(timer(h, 2).ms).toBe(0);
+	expect(timer(h, 3).ms).toBe(2000);
+});
+
+test("disabling panes drops queued opens but still follows an existing pane's lifecycle", async () => {
+	const h = harness({ autoClose: false, maxPanes: 1, layoutHeights: { "w1:p2": 26 } });
+	await h.pm.open(file("A"), "agent A");
+	await h.pm.open(file("B"), "agent B");
+	const reconcile = timer(h);
+	h.pm.setEnabled(false);
+	expect(reconcile.cancelled).toBe(true);
+	expect(h.pm.has(file("A"))).toBe(true);
+	expect(h.pm.has(file("B"))).toBe(false);
+	await h.pm.open(file("C"), "agent C");
+	h.pm.finish(file("A"), "completed");
+	await h.pm.open(file("A"), "agent A revived");
+	await settle();
+	expect(callsMatching(h, "split ")).toEqual(["split w1:p1 right 0.6"]);
+	expect(callsMatching(h, "rename ")).toContain("rename w1:p2 agent A");
+	h.pm.setEnabled(true);
+	delete h.herdr.layoutHeights["w1:p2"];
+	await h.pm.open(file("D"), "agent D");
+	timer(h, 1).fire();
+	await settle();
+	expect(h.herdr.calls).toContain(`run w1:p3 omp viewer ${file("D")} --label agent D`);
+});
+
+test("disabling automatic close starts reconciliation for an already waiting pane", async () => {
+	const h = harness({ maxPanes: 1, layoutHeights: { "w1:p2": 26 } });
+	await h.pm.open(file("A"), "agent A");
+	await h.pm.open(file("B"), "agent B");
+	expect(h.timers).toEqual([]);
+	h.pm.setClosePolicy({ autoClose: false, closeDelayMs: 1000, failCloseDelayMs: 5000 });
+	expect(timer(h).ms).toBe(1000);
+	delete h.herdr.layoutHeights["w1:p2"];
+	timer(h).fire();
+	await settle();
+	expect(h.herdr.calls).toContain(`run w1:p3 omp viewer ${file("B")} --label agent B`);
+});
+
+test("a policy change during pane creation is applied when the pane opens", async () => {
+	const h = harness({ ticks: 4 });
+	const opening = h.pm.open(file("A"), "agent A");
+	h.pm.finish(file("A"), "completed");
+	h.pm.setClosePolicy({ autoClose: false, closeDelayMs: 1000, failCloseDelayMs: 5000 });
+	await opening;
+	expect(h.timers).toEqual([]);
+	h.advance(1500);
+	h.pm.setClosePolicy({ autoClose: true, closeDelayMs: 1000, failCloseDelayMs: 5000 });
+	expect(timer(h).ms).toBe(0);
 });

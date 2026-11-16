@@ -15,6 +15,10 @@ export interface OmpLogger {
 export interface ExtensionAPI {
 	events: OmpEventBus;
 	logger: OmpLogger;
+	registerCommand(name: string, options: {
+		description: string;
+		handler: (args: string, ctx: { ui: { notify(message: string, type: "info" | "error"): void } }) => void | Promise<void>;
+	}): void;
 	on(
 		event: "session_shutdown",
 		handler: (event: unknown, ctx: unknown) => void | Promise<void>,

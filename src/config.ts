@@ -53,13 +53,13 @@ function isMaxPanes(value: number): boolean {
 
 /**
  * Builds the config from the process environment.
- * Returns `null` (extension disabled) when `HERDR_PANE_ID` is missing/empty or `OMP_HERDR_PANES`
- * is `0`. Invalid numbers fall back to their defaults, per field.
+ * Returns `null` outside Herdr or when `OMP_HERDR_PANES` is `0`, unless `includeDisabled` is set.
+ * Invalid numbers fall back to their defaults, per field.
  */
-export function readConfig(env: Record<string, string | undefined>): Config | null {
+export function readConfig(env: Record<string, string | undefined>, includeDisabled = false): Config | null {
 	const mainPaneId = env["HERDR_PANE_ID"];
 	if (mainPaneId === undefined || mainPaneId === "") return null;
-	if (env["OMP_HERDR_PANES"] === "0") return null;
+	if (!includeDisabled && env["OMP_HERDR_PANES"] === "0") return null;
 
 	return {
 		mainPaneId,

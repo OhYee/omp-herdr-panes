@@ -17,6 +17,7 @@ test("readConfig disables the extension outside Herdr and when switched off", ()
 	expect(readConfig({})).toBeNull();
 	expect(readConfig({ HERDR_PANE_ID: "" })).toBeNull();
 	expect(readConfig({ HERDR_PANE_ID: "w1:p1", OMP_HERDR_PANES: "0" })).toBeNull();
+	expect(readConfig({ HERDR_PANE_ID: "w1:p1", OMP_HERDR_PANES: "0" }, true)?.mainPaneId).toBe("w1:p1");
 });
 
 test("readConfig falls back to the documented defaults", () => {
