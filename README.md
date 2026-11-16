@@ -17,7 +17,8 @@ itself by default a few seconds after its subagent finishes, and your omp pane g
   output. Expand or collapse each item and scroll without sending input to the subagent.
   Thinking, tool calls, tool results and errors start collapsed.
   Thinking uses the terminal's default foreground; input is magenta, tool calls blue, tool results
-  cyan, output green, and other items yellow. Code and tool arguments retain syntax highlighting.
+  cyan, advisor feedback bright magenta, output green, and other items yellow. Code and tool arguments
+  retain syntax highlighting.
   Consecutive thinking blocks are merged. Consecutive tool calls form a collapsed `TOOLS: N`
   group. A call and its matching result share one expandable item, matched by tool call ID;
   results without an unambiguous match remain separate.
@@ -25,6 +26,8 @@ itself by default a few seconds after its subagent finishes, and your omp pane g
   or ambiguous records remain separate.
 - **Live updates**: assistant text, thinking and tool-call snapshots stream from omp events;
   completed messages and tool results are read from the session transcript.
+- **Agent messages**: incoming IRC appears as `INPUT · IRC`, background completions as tool
+  results, and advisor feedback as `ADVISOR`; other custom messages retain their JSON fallback.
 - **Nested subagents too**: a subagent that spawns its own subagents gets panes for them as well
   (e.g. `Outer · task` and `Outer.Inner · sonic`).
 - **Outcome at a glance**: when a subagent ends, its pane title gets a `✓` (completed) or `✗`

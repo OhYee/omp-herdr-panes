@@ -52,6 +52,7 @@ export function renderEntry(entry: unknown, options: RenderOptions): string[] {
 		const rendered = record === null ? [] :
 			type === "session_init" ? renderSessionInit(record, options) :
 			type === "message" ? renderMessage(record, options) :
+			type === "custom_message" && (record["customType"] === "irc:incoming" || record["customType"] === "async-result" || record["customType"] === "advisor") ? renderCustomMessage(record, options) :
 			type === "custom" ? renderCustom(record, options) : [];
 		const message = recordOf(record?.["message"]);
 		const content = message?.["content"];
@@ -145,6 +146,20 @@ function renderMessage(record: Record<string, unknown>, options: RenderOptions):
 	if (role === "assistant") return renderAssistantMessage(message, options);
 	if (role === "toolResult") return renderToolResultMessage(message, options);
 	return [];
+}
+
+function renderCustomMessage(record: Record<string, unknown>, options: RenderOptions): string[] {
+	const content = record["content"];
+	if (typeof content !== "string" && !Array.isArray(content)) return [];
+	const title = record["customType"] === "irc:incoming" ? "IRC input:" : record["customType"] === "advisor" ? "Advisor:" : "Async result:";
+	const out = [composeLine([{ text: title, style: "bold" }], options, true)];
+	if (typeof content === "string") out.push(...wrapText(content, normalizeWidth(options.width)));
+	else for (const block of content) {
+		const item = recordOf(block);
+		if (item?.["type"] === "text" && typeof item["text"] === "string") out.push(...wrapText(item["text"], normalizeWidth(options.width)));
+		else out.push(...renderFallback(block, options));
+	}
+	return out;
 }
 
 function renderUserMessage(message: Record<string, unknown>, options: RenderOptions): string[] {

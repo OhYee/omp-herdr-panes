@@ -184,6 +184,27 @@ test("unknown and malformed entries remain visible as JSON", () => {
 	expect(render(result).join("\n")).toContain('"payload": "full output"');
 });
 
+test("incoming IRC messages render as input and keep all lines and unfamiliar blocks", () => {
+	const lines = Array.from({ length: 9 }, (_, index) => `line ${index + 1}`);
+	const input = { type: "custom_message", customType: "irc:incoming", content: `[IRC from parent]\n${lines.join("\n")}` };
+	const rendered = render(input);
+	expect(rendered[0]).toBe("IRC input:");
+	expect(rendered).toContain("[IRC from parent]");
+	expect(rendered).toContain("line 9");
+	const blocks = { type: "custom_message", customType: "irc:incoming", content: [{ type: "text", text: "hello" }, { type: "future", value: 1 }] };
+	expect(render(blocks).join("\n")).toContain('"value": 1');
+	expect(render({ type: "custom_message", customType: "irc:incoming", details: { message: "missing content" } }).join("\n")).toContain("missing content");
+});
+
+test("async completion and advisor messages render with their own labels", () => {
+	const asyncResult = { type: "custom_message", customType: "async-result", content: "job done" };
+	const advisor = { type: "custom_message", customType: "advisor", content: [{ type: "text", text: "review note" }] };
+	expect(render(asyncResult)).toEqual(["Async result:", "job done"]);
+	expect(render(advisor)).toEqual(["Advisor:", "review note"]);
+	const other = { type: "custom_message", customType: "skill-notice", content: "keep raw" };
+	expect(JSON.parse(render(other).join("\n"))).toEqual(other);
+});
+
 test("control sequences never reach the output, with or without color", () => {
 	const evil = "\x1b]0;pwned\x07\x1b[31mred\x1b[0m";
 	expect(render(toolResult(evil))).toEqual(["  ✓ bash  red"]);

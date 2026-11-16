@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format follows
 - Show unrecognized transcript records and live events as expandable JSON instead of skipping them.
 - Show the session file being read and provide `p` to copy its full path using OSC 52.
 - Group matching tool execution start records with their call and result without hiding unmatched records.
+- Display incoming IRC as input, async completions as tool results, and advisor feedback separately.
 - Show the resolved model on a color-coded status line and follow default/fallback model changes.
 
 ### Changed

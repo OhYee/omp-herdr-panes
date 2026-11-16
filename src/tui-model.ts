@@ -1,6 +1,6 @@
 import { recordOf, sanitize, summarizeArgs } from "./render.ts";
 
-export type CardKind = "input" | "thinking" | "tools" | "tool" | "execution" | "result" | "output" | "status";
+export type CardKind = "input" | "thinking" | "tools" | "tool" | "execution" | "result" | "advisor" | "output" | "status";
 
 export interface Card {
 	id: string;
@@ -179,6 +179,21 @@ export class TranscriptModel {
 				body: pretty(record), expanded: this.toolsExpanded, toolCallId });
 			if (this.follow) this.selected = Math.max(0, this.all.length - 1);
 			return true;
+		}
+		if (record["type"] === "custom_message" &&
+			(typeof record["content"] === "string" || Array.isArray(record["content"]))) {
+			const customType = record["customType"];
+			if (customType === "irc:incoming" || customType === "async-result" || customType === "advisor") {
+				const id = typeof record["id"] === "string" ? record["id"] : `entry-${this.sequence++}`;
+				const details = customType === "async-result" ? recordOf(record["details"]) : null;
+				const failed = Array.isArray(details?.["jobs"]) && details["jobs"].some(job => recordOf(job)?.["status"] === "failed");
+				const kind = customType === "irc:incoming" ? "input" : customType === "advisor" ? "advisor" : "result";
+				const title = customType === "irc:incoming" ? "INPUT · IRC" : customType === "advisor" ? "ADVISOR" : failed ? "ASYNC ERROR" : "ASYNC RESULT";
+				this.cards.push({ id, kind, title, body: textOf(record["content"]), expanded: kind === "result" ? this.toolsExpanded : true, error: failed });
+				if (kind === "input" && this.status === "ended") this.status = "running";
+				if (this.follow) this.selected = Math.max(0, this.all.length - 1);
+				return true;
+			}
 		}
 		if (record["type"] !== "message") {
 			const type = typeof record["type"] === "string" ? record["type"] : "unknown";

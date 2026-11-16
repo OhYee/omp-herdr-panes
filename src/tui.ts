@@ -103,7 +103,7 @@ function highlightCode(text: string, base: string): string {
 interface Row { text: string; card: number; kind: CardKind; header: boolean; code?: boolean }
 
 const CARD_COLORS: Record<CardKind, string> = {
-	input: "35", thinking: "39", tools: "34", tool: "34", execution: "33", result: "36", output: "32", status: "33",
+	input: "35", thinking: "39", tools: "34", tool: "34", execution: "33", result: "36", advisor: "95", output: "32", status: "33",
 };
 
 /** An interactive, read-only transcript pane with per-item folding. */

@@ -369,6 +369,66 @@ test("unrecognized entries, message roles and assistant blocks have expandable J
 	expect(model.cards.at(-1)?.body).toContain('"source":"live"');
 });
 
+test("incoming IRC messages appear as input while other custom messages retain their fallback", () => {
+	const model = new TranscriptModel();
+	model.status = "ended";
+	model.append({
+		type: "custom_message", id: "irc-1", customType: "irc:incoming",
+		content: "[IRC from parent]\nPlease inspect this.\n  Keep the details.",
+		details: { from: "parent", message: "Please inspect this." },
+	});
+	expect(model.all[0]).toMatchObject({
+		id: "irc-1", kind: "input", title: "INPUT · IRC",
+		body: "[IRC from parent]\nPlease inspect this.\n  Keep the details.", expanded: true,
+	});
+	expect(model.status).toBe("running");
+	model.append({ type: "custom_message", customType: "irc:incoming", content: [{ type: "text", text: "reply" }, { type: "future", value: 1 }] });
+	expect(model.all[1]?.kind).toBe("input");
+	expect(model.all[1]?.body).toContain("reply\n");
+	expect(model.all[1]?.body).toContain('"value": 1');
+	model.append({ type: "custom_message", customType: "irc:outgoing", content: "other" });
+	model.append({ type: "custom_message", customType: "irc:incoming", details: { message: "missing content" } });
+	expect(model.all.slice(2).map(card => card.title)).toEqual(["ENTRY custom_message irc:outgoing", "ENTRY custom_message irc:incoming"]);
+});
+
+test("async completions join tool controls while advisor and unknown messages stay separate", () => {
+	const model = new TranscriptModel();
+	model.append({ type: "custom_message", customType: "irc:incoming", content: "from parent: inspect this" });
+	model.append(message("assistant", [
+		{ type: "toolCall", id: "one", name: "bash", arguments: {} },
+		{ type: "toolCall", id: "two", name: "task", arguments: {} },
+	]));
+	model.append({
+		type: "custom_message", id: "async-1", customType: "async-result",
+		content: "job one completed\njob two failed",
+		details: { jobs: [{ jobId: "one", type: "bash", status: "completed" }, { jobId: "two", type: "task", status: "failed" }] },
+	});
+	model.append({ type: "custom_message", id: "advisor-1", customType: "advisor", content: "Check the failure." });
+	model.append({ type: "custom_message", customType: "skill-notice", content: "raw fallback" });
+	expect(model.all.map(card => card.kind)).toEqual(["input", "tools", "advisor", "status"]);
+	model.toggleTools();
+	expect(model.all.map(card => card.kind)).toEqual(["input", "tools", "tool", "tool", "result", "advisor", "status"]);
+	expect(model.all[2]?.result).toBeUndefined();
+	expect(model.all[3]?.result).toBeUndefined();
+	expect(model.all[4]).toMatchObject({ id: "async-1", title: "ASYNC ERROR", error: true, body: "job one completed\njob two failed", expanded: true });
+	expect(model.all[5]).toMatchObject({ id: "advisor-1", title: "ADVISOR", body: "Check the failure.", expanded: true });
+	expect(model.all[6]?.body).toContain("raw fallback");
+	model.toggleTools();
+	expect(model.all.map(card => card.kind)).toEqual(["input", "tools", "advisor", "status"]);
+	expect(model.all[2]?.expanded).toBe(true);
+});
+
+test("valid async results without failures remain distinct and invalid messages use the fallback", () => {
+	const model = new TranscriptModel();
+	model.append({ type: "custom_message", customType: "async-result", content: "finished", details: { jobs: [{ status: "completed" }] } });
+	model.append({ type: "custom_message", customType: "async-result", content: "status unavailable" });
+	model.append({ type: "custom_message", customType: "advisor", details: { note: "missing content" } });
+	expect(model.all[0]).toMatchObject({ kind: "result", title: "ASYNC RESULT", error: false, body: "finished" });
+	expect(model.all[1]).toMatchObject({ kind: "result", title: "ASYNC RESULT", error: false, body: "status unavailable" });
+	expect(model.all[2]?.title).toBe("ENTRY custom_message advisor");
+	expect(model.all[2]?.body).toContain("missing content");
+});
+
 test("labels remove terminal control sequences while preserving Chinese text", () => {
 	expect(cardSummary("\x1b]0;malicious\x07中文\x1b[31m标题\x1b[0m\nnext")).toBe("中文标题 next");
 });
