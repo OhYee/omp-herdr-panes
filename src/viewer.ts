@@ -1,23 +1,22 @@
 /**
  * Viewer process — the program that runs inside each subagent pane.
  *
- * ```
- * BUN_BE_BUN=1 omp src/viewer.ts <sessionFile> [--title <label>] [--thinking <n>] [--parent-pid <n>]
- * ```
+ * Usage: bun src/viewer.ts <session-id|session-file> [--session-dir <dir>] [--title <label>]
+ *        [--parent-pid <pid>] [--socket <path> --token <token>]
  *
- * It clears the screen (hiding the command line herdr typed), prints a title, waits for the
- * transcript file to appear, then tails it: every complete JSONL line is parsed, rendered by
- * `renderEntry` and written to stdout. Read-only, and it never exits on its own except when the
- * `--parent-pid` watchdog sees the parent go away (so a SIGKILLed omp cannot orphan the viewer).
- * After `session_exit` the tail interval slows down, staying ready for a revived subagent's
- * follow-up turn. A bad line or an unreadable file is reported once and the viewer keeps running.
+ * The terminal view follows the persisted transcript and optional live snapshots.
+ * It is read-only and exits when its parent process disappears.
  */
 
 import { watch } from "node:fs";
+import { createConnection, type Socket } from "node:net";
 import { createLineSplitter } from "./line-splitter.ts";
-import { type SessionTotals, recordOf, renderEntry, usageOf } from "./render.ts";
+import { type SessionTotals, recordOf, renderEntry, sanitize, usageOf } from "./render.ts";
+import { TranscriptModel } from "./tui-model.ts";
+import { ViewerTui } from "./tui.ts";
+import { resolveSessionFile } from "./session-file.ts";
 
-const USAGE = "usage: viewer <sessionFile> [--title <label>] [--thinking <n>] [--parent-pid <n>]";
+const USAGE = "usage: viewer <session-id|session-file> [--session-dir <dir>] [--title <label>] [--thinking <n>] [--parent-pid <n>] [--socket <path> --token <token>]";
 const DEFAULT_THINKING_LINES = 2;
 /** Poll cadence while the transcript file does not exist yet. */
 const POLL_INTERVAL_MS = 250;
@@ -30,14 +29,17 @@ const PARENT_CHECK_INTERVAL_MS = 1000;
 const DEFAULT_WIDTH = 80;
 const CLEAR_SCREEN = "\x1b[2J\x1b[H";
 const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
 
 interface ViewerOptions {
 	sessionFile: string;
+	sessionDir?: string;
 	title: string;
 	thinkingLines: number;
 	parentPid: number | null;
+	socketPath: string | null;
+	token: string | null;
+	streamUnavailable: boolean;
 }
 
 /** Per-session accounting shared between the tail loop and the renderer. */
@@ -45,6 +47,8 @@ interface TailState {
 	totals: SessionTotals;
 	startMs: number | null;
 	onSessionExit: () => void;
+	model?: TranscriptModel;
+	tui?: ViewerTui;
 }
 
 /**
@@ -56,6 +60,10 @@ function parseViewerArgs(argv: readonly string[]): ViewerOptions | null {
 	let title: string | null = null;
 	let thinkingLines = DEFAULT_THINKING_LINES;
 	let parentPid: number | null = null;
+	let socketPath: string | null = null;
+	let token: string | null = null;
+	let streamUnavailable = false;
+	let sessionDir: string | undefined;
 
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index];
@@ -65,6 +73,11 @@ function parseViewerArgs(argv: readonly string[]): ViewerOptions | null {
 				title = value;
 				index += 1;
 			}
+			continue;
+		}
+		if (arg === "--session-dir") {
+			sessionDir = argv[index + 1];
+			if (sessionDir !== undefined) index += 1;
 			continue;
 		}
 		if (arg === "--thinking") {
@@ -85,13 +98,26 @@ function parseViewerArgs(argv: readonly string[]): ViewerOptions | null {
 			}
 			continue;
 		}
+		if (arg === "--stream-unavailable") {
+			streamUnavailable = true;
+			continue;
+		}
+		if (arg === "--socket" || arg === "--token") {
+			const value = argv[index + 1];
+			if (value !== undefined) {
+				if (arg === "--socket") socketPath = value;
+				else token = value;
+				index += 1;
+			}
+			continue;
+		}
 		if (arg !== undefined && sessionFile === null && !arg.startsWith("--")) {
 			sessionFile = arg;
 		}
 	}
 
 	if (sessionFile === null || sessionFile.length === 0) return null;
-	return { sessionFile, title: title ?? basenameWithoutJsonl(sessionFile), thinkingLines, parentPid };
+	return { sessionFile, sessionDir, title: title ?? basenameWithoutJsonl(sessionFile), thinkingLines, parentPid, socketPath, token, streamUnavailable };
 }
 
 /** Last path segment, with a `.jsonl` suffix removed. */
@@ -157,6 +183,17 @@ function renderTranscriptLine(line: string, options: ViewerOptions, state: TailS
 	}
 
 	accumulate(entry, state);
+	if (state.model && state.tui) {
+		const changed = state.model.append(entry);
+		if (isSessionExit(entry)) {
+			const summary = renderEntry(entry, { width: 1000, color: false, thinkingLines: 0, totals: state.totals }).join("\n");
+			state.model.cards.push({ id: `summary:${state.model.cards.length}`, kind: "status", title: "SUMMARY", body: summary, expanded: false });
+			if (state.model.follow) state.model.selected = state.model.cards.length - 1;
+			state.onSessionExit();
+		}
+		if (changed) state.tui.requestRender();
+		return;
+	}
 	const rendered = renderEntry(entry, {
 		width: process.stdout.columns || DEFAULT_WIDTH,
 		color: process.stdout.isTTY === true,
@@ -171,7 +208,7 @@ function renderTranscriptLine(line: string, options: ViewerOptions, state: TailS
 /** Poll until the transcript file exists (it appears 1–5 s after the subagent starts). */
 async function waitForTranscript(sessionFile: string): Promise<void> {
 	if (await Bun.file(sessionFile).exists()) return;
-	process.stdout.write(`${DIM}waiting for transcript…${RESET}\n`);
+	if (!process.stdout.isTTY) process.stdout.write("waiting for transcript…\n");
 	while (!(await Bun.file(sessionFile).exists())) {
 		await new Promise<void>((resolve) => {
 			setTimeout(resolve, POLL_INTERVAL_MS);
@@ -184,7 +221,7 @@ async function waitForTranscript(sessionFile: string): Promise<void> {
  * at most one read is in flight at a time, and a wake arriving during a read schedules exactly
  * one follow-up read.
  */
-function startTailLoop(options: ViewerOptions): void {
+async function startTailLoop(options: ViewerOptions, model?: TranscriptModel, tui?: ViewerTui): Promise<void> {
 	const splitter = createLineSplitter();
 	let offset = 0;
 	let reading = false;
@@ -194,6 +231,8 @@ function startTailLoop(options: ViewerOptions): void {
 	const state: TailState = {
 		totals: { tokens: 0, cost: 0, durationMs: null },
 		startMs: null,
+		model,
+		tui,
 		onSessionExit: () => setIntervalMs(EXIT_TAIL_INTERVAL_MS),
 	};
 
@@ -207,6 +246,12 @@ function startTailLoop(options: ViewerOptions): void {
 		if (size < offset) {
 			offset = 0; // truncated or replaced
 			splitter.reset();
+			if (state.model) {
+				state.model.cards = [];
+				state.model.selected = 0;
+				state.totals = { tokens: 0, cost: 0, durationMs: null };
+				state.startMs = null;
+			}
 		}
 		if (size <= offset) return;
 
@@ -252,7 +297,7 @@ function startTailLoop(options: ViewerOptions): void {
 	} catch (error) {
 		reportProblem("watch failed", error);
 	}
-	void pump();
+	await pump();
 }
 
 /**
@@ -270,9 +315,10 @@ function watchParent(pid: number): void {
 }
 
 /** SIGTERM/SIGHUP/SIGINT end the viewer cleanly; every other failure is reported and survived. */
-function installProcessHandlers(): void {
+function installProcessHandlers(tui?: ViewerTui): void {
 	for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"] as const) {
 		process.on(signal, () => {
+			tui?.stop();
 			process.exit(0);
 		});
 	}
@@ -284,20 +330,75 @@ function installProcessHandlers(): void {
 	});
 }
 
+/** Connect to the parent's private live-event broker; transcript files remain authoritative. */
+function connectLive(path: string, token: string, model: TranscriptModel, tui: ViewerTui): void {
+	const connect = () => {
+		model.streamStatus = "connecting";
+		tui.requestRender();
+		const socket: Socket = createConnection(path);
+		let buffer = "";
+		socket.setEncoding("utf8");
+		socket.on("connect", () => socket.write(`${JSON.stringify({ token })}\n`));
+		socket.on("data", (chunk: string) => {
+			buffer += chunk;
+			let newline = buffer.indexOf("\n");
+			while (newline >= 0) {
+				const line = buffer.slice(0, newline);
+				buffer = buffer.slice(newline + 1);
+				try {
+					const frame = recordOf(JSON.parse(line));
+					if (frame?.["type"] === "live" && Array.isArray(frame["content"])) model.setLive(frame["content"]);
+					else if (frame?.["type"] === "clear") model.clearLive();
+					else if (frame?.["type"] === "state" && typeof frame["status"] === "string") model.status = frame["status"];
+					else if (frame?.["type"] === "stream_error") model.streamStatus = "unavailable";
+					if (frame?.["type"] !== "stream_error") model.streamStatus = "live";
+					tui.requestRender();
+				} catch {
+					socket.destroy();
+					return;
+				}
+				newline = buffer.indexOf("\n");
+			}
+			if (buffer.length > 1024 * 1024) socket.destroy();
+		});
+		socket.on("error", () => socket.destroy());
+		socket.on("close", () => {
+			model.streamStatus = "unavailable";
+			tui.requestRender();
+			setTimeout(connect, 1000).unref();
+		});
+	};
+	connect();
+}
+
 async function main(): Promise<void> {
-	const options = parseViewerArgs(process.argv.slice(2));
+	const args = process.argv.slice(2);
+	if (args.includes("--help") || args.includes("-h")) {
+		process.stdout.write(`${USAGE}\n`);
+		return;
+	}
+	const options = parseViewerArgs(args);
 	if (options === null) {
 		process.stderr.write(`${USAGE}\n`);
 		process.exit(2);
 	}
+	options.sessionFile = await resolveSessionFile(options.sessionFile, options.sessionDir);
 
-	installProcessHandlers();
+	const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
+	const model = interactive ? new TranscriptModel() : undefined;
+	if (model && options.streamUnavailable) model.streamStatus = "unavailable";
+	if (model && !options.socketPath && !options.streamUnavailable) model.status = "history";
+	const tui = model ? new ViewerTui(model, options.title, () => process.exit(0)) : undefined;
+	installProcessHandlers(tui);
 	if (options.parentPid !== null) watchParent(options.parentPid);
-	process.stdout.write(`${CLEAR_SCREEN}${BOLD}${options.title}${RESET}\n\n`);
+	if (tui) tui.start();
+	else process.stdout.write(`${CLEAR_SCREEN}${BOLD}${sanitize(options.title).replace(/\n/gu, " ")}${RESET}\n\n`);
 	await waitForTranscript(options.sessionFile);
-	startTailLoop(options);
+	await startTailLoop(options, model, tui);
+	if (model && tui && options.socketPath && options.token) connectLive(options.socketPath, options.token, model, tui);
 }
 
 void main().catch((error: unknown) => {
 	reportProblem("startup failed", error);
+	process.exitCode = 1;
 });

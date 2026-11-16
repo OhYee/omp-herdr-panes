@@ -10,6 +10,8 @@ export interface Config {
 	mainPaneId: string;
 	/** Width share kept by the main pane on the first split. */
 	ratio: number;
+	/** Whether finished panes close automatically. */
+	autoClose: boolean;
 	/** Delay between a subagent completing successfully and its pane closing. */
 	closeDelayMs: number;
 	/** Delay before closing the pane of a failed or aborted subagent. */
@@ -62,6 +64,7 @@ export function readConfig(env: Record<string, string | undefined>): Config | nu
 	return {
 		mainPaneId,
 		ratio: readNumber(env["OMP_HERDR_PANES_RATIO"], DEFAULT_RATIO, isRatio),
+		autoClose: env["OMP_HERDR_PANES_AUTO_CLOSE"] !== "0",
 		closeDelayMs: readNumber(env["OMP_HERDR_PANES_CLOSE_DELAY_MS"], DEFAULT_CLOSE_DELAY_MS, isCloseDelay),
 		failCloseDelayMs: readNumber(
 			env["OMP_HERDR_PANES_FAIL_DELAY_MS"],

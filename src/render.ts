@@ -24,7 +24,7 @@ export interface SessionTotals {
 	durationMs: number | null;
 }
 
-type Style = "bold" | "dim" | "red" | "green" | "cyan";
+type Style = "bold" | "red" | "green" | "cyan";
 
 interface Segment {
 	text: string;
@@ -33,7 +33,6 @@ interface Segment {
 
 const STYLE_CODES: Record<Style, string> = {
 	bold: "\x1b[1m",
-	dim: "\x1b[2m",
 	red: "\x1b[31m",
 	green: "\x1b[32m",
 	cyan: "\x1b[36m",
@@ -134,7 +133,7 @@ function renderUserMessage(message: Record<string, unknown>, options: RenderOpti
 	if (lines[0] === USER_TEXT_MARKER) lines.shift();
 	const out = [composeLine([{ text: "Task:", style: "bold" }], options, true)];
 	for (const line of lines.slice(0, USER_TEXT_LINE_LIMIT)) {
-		out.push(composeLine([{ text: `  ${line}`, style: "dim" }], options, true));
+		out.push(composeLine([{ text: `  ${line}`, style: null }], options, true));
 	}
 	return out;
 }
@@ -169,7 +168,7 @@ function renderThinkingBlock(record: Record<string, unknown>, options: RenderOpt
 	if (thinking === null) return [];
 	return nonEmptyLines(thinking)
 		.slice(-shown)
-		.map((line) => composeLine([{ text: `  ~ ${line}`, style: "dim" }], options, true));
+		.map((line) => composeLine([{ text: `  ~ ${line}`, style: null }], options, true));
 }
 
 function renderTextBlock(record: Record<string, unknown>, options: RenderOptions): string[] {
@@ -231,7 +230,7 @@ function renderToolResultMessage(message: Record<string, unknown>, options: Rend
 	} else {
 		segments.push({ text: ` ${first}`, style: null });
 		const extra = lines.length - 1;
-		if (extra > 0) segments.push({ text: ` (+${extra} lines)`, style: "dim" });
+		if (extra > 0) segments.push({ text: ` (+${extra} lines)`, style: null });
 	}
 	return [composeLine(segments, options, true)];
 }
@@ -246,7 +245,7 @@ function renderCustom(record: Record<string, unknown>, options: RenderOptions): 
 		if (totals.durationMs !== null) parts.push(formatDuration(totals.durationMs));
 	}
 	const text = parts.length === 0 ? "■ session ended" : `■ session ended · ${parts.join(" · ")}`;
-	return [composeLine([{ text, style: "dim" }], options, true)];
+	return [composeLine([{ text, style: null }], options, true)];
 }
 
 /** `999`, `47.2k`, `1.2M`. */

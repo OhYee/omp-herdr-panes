@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Interactive viewer with folding, mouse and Vim navigation, distinct content colors, and
+  lightweight highlighting of fenced code and tool arguments.
+- Stream subagent thinking, text and tool calls from live events while retaining JSONL as the
+  durable transcript.
+- Open a saved session by ID, ID prefix or JSONL path.
+- `OMP_HERDR_PANES_AUTO_CLOSE=0` keeps finished panes open until manually closed or omp exits.
+- `t` toggles all thinking blocks and sets the default for new thinking.
+
+### Changed
+
+- Run read-only viewer panes with standalone Bun so Herdr does not list them as OMP agents.
+- Honor configured close delays even when other subagents are waiting for a pane.
+- Merge consecutive thinking and fold consecutive tool calls with their results into counted groups.
+- Pair tool calls and results by call ID in one expandable item, including out-of-order results.
+- Use compact card spacing and distinguish content types with the configured ANSI colors.
+- Start thinking collapsed and render without ANSI dim styling.
+- Move the selected item along with Ctrl+U/Ctrl+D half-page scrolling.
+
 ## [0.2.0] - 2026-10-04
 
 ### Added
@@ -48,6 +68,6 @@ All notable changes to this project are documented here. The format follows
 - First release: one read-only Herdr pane per omp subagent, stacked to the right of omp, streaming
   task, thinking, tool calls and results live, and closing a few seconds after the subagent ends.
 
-[Unreleased]: https://github.com/bekto/omp-herdr-panes/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/OhYee/omp-herdr-panes/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/bekto/omp-herdr-panes/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/bekto/omp-herdr-panes/releases/tag/v0.1.0

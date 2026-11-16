@@ -8,6 +8,7 @@
  * exception escaping an extension callback would take down the whole omp session.
  */
 
+import { HerdrError } from "./herdr.ts";
 import type { Herdr, LayoutPane } from "./herdr.ts";
 
 export interface PaneManagerConfig {
@@ -17,6 +18,8 @@ export interface PaneManagerConfig {
 	ratio: number;
 	/** Max simultaneously open subagent panes; extra subagents wait in FIFO order for a slot. */
 	maxPanes: number;
+	/** Disable automatic closing and eviction when false; defaults to true. */
+	autoClose?: boolean;
 	/** Delay between a `completed` finish() and closing the pane. */
 	closeDelayMs: number;
 	/** Delay between any other (failed, aborted, …) finish() and closing the pane. */
@@ -36,11 +39,14 @@ interface Entry {
 	done: boolean;
 	/** Terminal lifecycle status (`completed`, `failed`, `aborted`, …) once done. */
 	status?: string;
+	closeGeneration?: number;
 	timer?: { cancel(): void };
 }
 
 /** Share of the split pane that a newly stacked pane keeps (the rest stays with the target). */
 const STACK_SPLIT_RATIO = 0.5;
+/** Poll only while work is waiting for a manually closed pane. */
+const RECONCILE_DELAY_MS = 1000;
 
 export class PaneManager {
 	readonly #herdr: Herdr;
@@ -53,6 +59,8 @@ export class PaneManager {
 	/** Tail of the serialized herdr job chain. Never rejects. */
 	#queue: Promise<void> = Promise.resolve();
 	#nextOrder = 0;
+	#reconcileTimer?: { cancel(): void };
+	#reconcileGeneration = 0;
 
 	constructor(herdr: Herdr, config: PaneManagerConfig, log: Log, schedule?: Schedule) {
 		this.#herdr = herdr;
@@ -67,14 +75,14 @@ export class PaneManager {
 
 	/**
 	 * Open a pane for this subagent (key = its sessionFile). Resolves when the herdr calls finished.
-	 * At the pane limit the oldest finished pane makes room; without one the subagent waits for a
-	 * free slot. Never rejects.
+	 * At the pane limit the subagent waits for a free slot. Never rejects.
 	 */
 	open(key: string, label: string): Promise<void> {
 		const existing = this.#entries.get(key);
 		if (existing !== undefined) {
 			// A repeated `started` event revives the subagent: drop the pending close, keep its pane.
 			this.#cancelTimer(existing);
+			existing.closeGeneration = (existing.closeGeneration ?? 0) + 1;
 			existing.done = false;
 			if (existing.status !== undefined) {
 				existing.status = undefined;
@@ -84,9 +92,10 @@ export class PaneManager {
 			return this.#queue;
 		}
 		if (this.#waiting.has(key)) return Promise.resolve();
-		if (this.#entries.size >= this.#config.maxPanes && !this.#evictFinished()) {
+		if (this.#entries.size >= this.#config.maxPanes) {
 			this.#log("pane limit reached, waiting for a free slot", { key });
 			this.#waiting.set(key, label);
+			this.#scheduleReconcile();
 			return Promise.resolve();
 		}
 		// Insert before enqueuing, so a finish() arriving while herdr is still working is not lost.
@@ -101,7 +110,10 @@ export class PaneManager {
 	 * closeDelayMs (`completed`) or failCloseDelayMs (anything else). Never throws.
 	 */
 	finish(key: string, status: string): void {
-		if (this.#waiting.delete(key)) return;
+		if (this.#waiting.delete(key)) {
+			if (this.#waiting.size === 0) this.#cancelReconcile();
+			return;
+		}
 		const entry = this.#entries.get(key);
 		if (entry === undefined) return;
 		entry.done = true;
@@ -115,6 +127,7 @@ export class PaneManager {
 
 	/** Close every pane now and cancel pending timers. Never rejects. */
 	async closeAll(): Promise<void> {
+		this.#cancelReconcile();
 		const closing = [...this.#entries];
 		for (const [, entry] of closing) this.#cancelTimer(entry);
 		// Forgotten right away: a pane opened from here on belongs to a new subagent.
@@ -173,7 +186,7 @@ export class PaneManager {
 			this.#log("pane run failed", { key, paneId, error: describeError(error) });
 		}
 		// finish() may have arrived while herdr was busy: schedule the close it could not.
-		if (entry.done) this.#scheduleClose(key, entry);
+		if (entry.done && this.#entries.get(key) === entry) this.#scheduleClose(key, entry);
 	}
 
 	/** Splits the tallest stacked pane downwards, or the main pane to the right when there is none. */
@@ -206,45 +219,18 @@ export class PaneManager {
 
 	/**
 	 * Schedules the delayed close of a finished entry; a second call while one is pending is a no-op.
-	 * With subagents waiting for a slot the pane closes right away instead.
 	 */
 	#scheduleClose(key: string, entry: Entry): void {
+		if (this.#config.autoClose === false) return;
 		if (entry.timer !== undefined) return;
-		const delay =
-			this.#waiting.size > 0
-				? 0
-				: entry.status === "completed"
-					? this.#config.closeDelayMs
-					: this.#config.failCloseDelayMs;
-		entry.timer = this.#schedule(() => {
+		const delay = entry.status === "completed" ? this.#config.closeDelayMs : this.#config.failCloseDelayMs;
+		const generation = entry.closeGeneration;
+		const timer = this.#schedule(() => {
+			if (entry.timer !== timer) return;
 			entry.timer = undefined;
-			void this.#enqueueClose(key, entry);
+			void this.#enqueueClose(key, entry, generation);
 		}, delay);
-	}
-
-	/**
-	 * Makes room at the pane limit by closing the oldest finished pane now (skipping its close
-	 * delay). Returns false when no finished pane exists.
-	 */
-	#evictFinished(): boolean {
-		let oldestKey: string | undefined;
-		let oldest: Entry | undefined;
-		for (const [key, entry] of this.#entries) {
-			// Without a pane id the open job is still running; it closes the pane itself.
-			if (!entry.done || entry.paneId === undefined) continue;
-			if (oldest === undefined || entry.order < oldest.order) {
-				oldestKey = key;
-				oldest = entry;
-			}
-		}
-		if (oldestKey === undefined || oldest === undefined) return false;
-		const key = oldestKey;
-		const paneId = oldest.paneId;
-		if (paneId === undefined) return false;
-		this.#cancelTimer(oldest);
-		this.#entries.delete(key);
-		void this.#enqueue(() => this.#closePane(paneId, key));
-		return true;
+		entry.timer = timer;
 	}
 
 	/** Opens panes for waiting subagents while slots are free, oldest first. */
@@ -254,6 +240,43 @@ export class PaneManager {
 			this.#waiting.delete(key);
 			void this.open(key, label);
 		}
+		if (this.#waiting.size === 0) this.#cancelReconcile();
+	}
+
+	#scheduleReconcile(): void {
+		if (this.#config.autoClose !== false || this.#waiting.size === 0 || this.#reconcileTimer !== undefined) return;
+		const generation = this.#reconcileGeneration;
+		const timer = this.#schedule(() => {
+			if (this.#reconcileTimer !== timer) return;
+			if (generation !== this.#reconcileGeneration) return;
+			this.#reconcileTimer = undefined;
+			void this.#enqueue(async () => {
+				if (generation !== this.#reconcileGeneration || this.#waiting.size === 0) return;
+				const candidates = [...this.#entries];
+				try {
+					const panes = await this.#herdr.layout(this.#config.mainPaneId);
+					if (generation !== this.#reconcileGeneration || this.#waiting.size === 0) return;
+					const present = new Set(panes.map((pane) => pane.paneId));
+					for (const [key, entry] of candidates) {
+						if (entry.paneId !== undefined && !present.has(entry.paneId) && this.#entries.get(key) === entry) {
+							this.#cancelTimer(entry);
+							this.#entries.delete(key);
+						}
+					}
+					this.#promote();
+				} catch (error) {
+					this.#log("pane layout failed", { error: describeError(error) });
+				}
+				if (generation === this.#reconcileGeneration) this.#scheduleReconcile();
+			});
+		}, RECONCILE_DELAY_MS);
+		this.#reconcileTimer = timer;
+	}
+
+	#cancelReconcile(): void {
+		this.#reconcileGeneration += 1;
+		this.#reconcileTimer?.cancel();
+		this.#reconcileTimer = undefined;
 	}
 
 	/** Sets the pane title: the label, prefixed with ✓/✗ once the subagent finished. */
@@ -267,10 +290,10 @@ export class PaneManager {
 	}
 
 	/** Queues the actual close; the entry must still be the finished one when the job finally runs. */
-	#enqueueClose(key: string, entry: Entry): Promise<void> {
+	#enqueueClose(key: string, entry: Entry, generation: number | undefined): Promise<void> {
 		return this.#enqueue(async () => {
 			// Gone, replaced, or revived (done === false) since the timer was armed → leave it alone.
-			if (this.#entries.get(key) !== entry || !entry.done) return;
+			if (this.#entries.get(key) !== entry || !entry.done || entry.closeGeneration !== generation) return;
 			const paneId = entry.paneId;
 			if (paneId === undefined) return;
 			// Forgotten before awaiting: a revive during the close gets a fresh pane of its own.
@@ -284,6 +307,7 @@ export class PaneManager {
 		try {
 			await this.#herdr.close(paneId);
 		} catch (error) {
+			if (error instanceof HerdrError && error.code === "pane_not_found") return;
 			this.#log("pane close failed", { key, paneId, error: describeError(error) });
 		}
 	}

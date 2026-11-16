@@ -141,6 +141,20 @@ test("color: true emits ANSI, color: false never does", () => {
 	expect(render(toolResult("boom", true), { color: true }).join("")).toContain("\x1b[31m");
 });
 
+test("fallback renderer never emits dim styling for input, thinking, results, or summaries", () => {
+	const entries = [
+		user("input"),
+		assistant({ type: "thinking", thinking: "thinking" }),
+		toolResult("first\nsecond"),
+		{ type: "custom", customType: "session_exit" },
+	];
+	const rendered = entries.flatMap(entry => render(entry, { color: true })).join("\n");
+	expect(rendered).toContain("thinking");
+	expect(rendered).toContain("(+1 lines)");
+	expect(rendered).toContain("session ended");
+	expect(rendered).not.toContain("\x1b[2m");
+});
+
 test("session_init and session_exit render their marker lines", () => {
 	expect(render({ type: "session_init", agent: "sonic", resolvedModel: "anthropic/claude-opus-5-5:medium" })).toEqual([
 		"● sonic · anthropic/claude-opus-5-5:medium",

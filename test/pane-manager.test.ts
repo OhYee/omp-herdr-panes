@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { HerdrError } from "../src/herdr.ts";
-import type { Herdr } from "../src/herdr.ts";
+import type { Herdr, LayoutPane } from "../src/herdr.ts";
 import { PaneManager } from "../src/pane-manager.ts";
 import type { Schedule } from "../src/pane-manager.ts";
 
@@ -114,7 +114,7 @@ interface Harness {
 	pm: PaneManager;
 }
 
-function harness(options: FakeHerdrOptions & { maxPanes?: number } = {}): Harness {
+function harness(options: FakeHerdrOptions & { maxPanes?: number; autoClose?: boolean } = {}): Harness {
 	const herdr = fakeHerdr(options);
 	const { schedule, timers } = fakeSchedule();
 	const logs: LogEntry[] = [];
@@ -124,6 +124,7 @@ function harness(options: FakeHerdrOptions & { maxPanes?: number } = {}): Harnes
 			mainPaneId: MAIN_PANE,
 			ratio: 0.6,
 			maxPanes: options.maxPanes ?? 6,
+			autoClose: options.autoClose,
 			closeDelayMs: 1000,
 			failCloseDelayMs: 5000,
 			viewerCommand: (sessionFile, label) => `omp viewer ${sessionFile} --label ${label}`,
@@ -219,9 +220,9 @@ test("opens beyond maxPanes wait without herdr calls and get the next free slot"
 
 	// A waiting subagent that ends before it got a pane never gets one.
 	h.pm.finish(file("D"), "completed");
-	// With C waiting, A's pane closes without the usual delay and C takes its slot.
+	// Waiting work does not shorten the configured close delay.
 	h.pm.finish(file("A"), "completed");
-	expect(timer(h).ms).toBe(0);
+	expect(timer(h).ms).toBe(1000);
 	timer(h).fire();
 	await settle();
 	expect(callsMatching(h, "close ")).toEqual(["close w1:p2"]);
@@ -230,19 +231,21 @@ test("opens beyond maxPanes wait without herdr calls and get the next free slot"
 	expect(h.pm.size).toBe(2);
 });
 
-test("at the limit, an open closes the oldest finished pane instead of waiting", async () => {
+test("at the limit, a finished pane keeps its configured delay before a waiting pane opens", async () => {
 	const h = harness({ maxPanes: 2, layoutHeights: { "w1:p3": 26 } });
 	await h.pm.open(file("A"), "agent A");
 	await h.pm.open(file("B"), "agent B");
 	h.pm.finish(file("B"), "failed");
 	h.pm.finish(file("A"), "completed");
 	await h.pm.open(file("C"), "agent C");
-	// A finished last but is older; its pending close is cancelled, B stays until its own timer.
+	expect(callsMatching(h, "close ")).toEqual([]);
+	expect(timer(h, 0).ms).toBe(5000);
+	expect(timer(h, 1).ms).toBe(1000);
+	timer(h, 1).fire();
+	await settle();
 	expect(callsMatching(h, "close ")).toEqual(["close w1:p2"]);
-	expect(h.timers.find((t) => t.ms === 1000)?.cancelled).toBe(true);
 	expect(h.herdr.calls).toContain(`run w1:p4 omp viewer ${file("C")} --label agent C`);
 	expect(h.pm.size).toBe(2);
-	expect(h.logs).toEqual([]);
 });
 
 test("finish marks the title with the outcome; failures stay open longer; a revive unmarks", async () => {
@@ -372,4 +375,111 @@ test("a failing layout falls back to splitting the main pane", async () => {
 	expect(h.logs.map((entry) => entry.message)).toEqual(["pane layout failed"]);
 	expect(callsMatching(h, "split ")).toEqual(["split w1:p1 right 0.6", "split w1:p1 right 0.6"]);
 	expect(h.pm.size).toBe(2);
+});
+
+test("disabled auto-close retains finished panes under pressure and promotes FIFO after manual closes", async () => {
+	const h = harness({ autoClose: false, maxPanes: 2, layoutHeights: { "w1:p2": 26, "w1:p3": 26 } });
+	await h.pm.open(file("A"), "agent A");
+	await h.pm.open(file("B"), "agent B");
+	h.pm.finish(file("A"), "completed");
+	h.pm.finish(file("B"), "failed");
+	expect(h.timers).toEqual([]);
+	await h.pm.open(file("C"), "agent C");
+	await h.pm.open(file("D"), "agent D");
+	expect(callsMatching(h, "close ")).toEqual([]);
+	expect(timer(h).ms).toBe(1000);
+
+	delete h.herdr.layoutHeights["w1:p2"];
+	timer(h).fire();
+	await settle();
+	expect(h.herdr.calls).toContain(`run w1:p4 omp viewer ${file("C")} --label agent C`);
+	expect(h.herdr.calls.join("\n")).not.toContain("agent D");
+	expect(callsMatching(h, "close ")).toEqual([]);
+	h.herdr.layoutHeights["w1:p4"] = 26;
+	delete h.herdr.layoutHeights["w1:p3"];
+	timer(h, 1).fire();
+	await settle();
+	expect(h.herdr.calls).toContain(`run w1:p5 omp viewer ${file("D")} --label agent D`);
+	expect(h.pm.size).toBe(2);
+});
+
+test("layout failure does not free a slot and reconciliation retries", async () => {
+	const h = harness({ autoClose: false, maxPanes: 1, layoutHeights: { "w1:p2": 26 }, failLayouts: 1 });
+	await h.pm.open(file("A"), "agent A");
+	h.pm.finish(file("A"), "failed");
+	await h.pm.open(file("B"), "agent B");
+	timer(h).fire();
+	await settle();
+	expect(h.pm.size).toBe(1);
+	expect(callsMatching(h, "split ").length).toBe(1);
+	expect(h.logs.map((entry) => entry.message)).toContain("pane layout failed");
+	delete h.herdr.layoutHeights["w1:p2"];
+	timer(h, 1).fire();
+	await settle();
+	expect(h.herdr.calls).toContain(`run w1:p3 omp viewer ${file("B")} --label agent B`);
+});
+
+test("shutdown cancels reconciliation even if a stale callback fires", async () => {
+	const h = harness({ autoClose: false, maxPanes: 1 });
+	await h.pm.open(file("A"), "agent A");
+	h.pm.finish(file("A"), "completed");
+	await h.pm.open(file("B"), "agent B");
+	const stale = timer(h);
+	await h.pm.closeAll();
+	expect(stale.cancelled).toBe(true);
+	expect(callsMatching(h, "close ")).toEqual(["close w1:p2"]);
+	const calls = [...h.herdr.calls];
+	stale.fire();
+	await settle();
+	expect(h.herdr.calls).toEqual(calls);
+});
+
+test("revival and a second finish invalidate an already queued close", async () => {
+	const h = harness({ ticks: 4 });
+	await h.pm.open(file("A"), "agent A");
+	h.pm.finish(file("A"), "completed");
+	timer(h).fire();
+	void h.pm.open(file("A"), "agent A");
+	h.pm.finish(file("A"), "failed");
+	await settle();
+	expect(callsMatching(h, "close ")).toEqual([]);
+	expect(timer(h, 1).ms).toBe(5000);
+	timer(h, 1).fire();
+	await settle();
+	expect(callsMatching(h, "close ")).toEqual(["close w1:p2"]);
+});
+
+test("shutdown during an opening finished pane does not leave a close timer", async () => {
+	const h = harness({ ticks: 4 });
+	const opening = h.pm.open(file("A"), "agent A");
+	h.pm.finish(file("A"), "completed");
+	const closing = h.pm.closeAll();
+	await opening;
+	await closing;
+	expect(h.timers).toEqual([]);
+	expect(callsMatching(h, "close ")).toEqual(["close w1:p2"]);
+});
+
+test("shutdown during a layout request cannot promote a queued pane", async () => {
+	const h = harness({ autoClose: false, maxPanes: 1 });
+	await h.pm.open(file("A"), "agent A");
+	await h.pm.open(file("B"), "agent B");
+	const layout = Promise.withResolvers<LayoutPane[]>();
+	h.herdr.layout = () => layout.promise;
+	timer(h).fire();
+	await settle();
+	const closing = h.pm.closeAll();
+	layout.resolve([]);
+	await closing;
+	expect(callsMatching(h, "split ").length).toBe(1);
+	expect(callsMatching(h, "close ")).toEqual(["close w1:p2"]);
+	expect(h.timers.length).toBe(1);
+});
+
+test("an already manually closed pane is not logged as a close failure", async () => {
+	const h = harness({ autoClose: false });
+	await h.pm.open(file("A"), "agent A");
+	h.herdr.close = async () => { throw new HerdrError("pane_not_found", "gone"); };
+	await h.pm.closeAll();
+	expect(h.logs).toEqual([]);
 });

@@ -23,6 +23,7 @@ test("readConfig falls back to the documented defaults", () => {
 	expect(readConfig({ HERDR_PANE_ID: "w1:p1" })).toEqual({
 		mainPaneId: "w1:p1",
 		ratio: 0.6,
+		autoClose: true,
 		closeDelayMs: 3000,
 		failCloseDelayMs: 10000,
 		maxPanes: 6,
@@ -37,9 +38,10 @@ test("readConfig honours valid overrides", () => {
 			OMP_HERDR_PANES_RATIO: "0.5",
 			OMP_HERDR_PANES_CLOSE_DELAY_MS: "0",
 			OMP_HERDR_PANES_FAIL_DELAY_MS: "60000",
+			OMP_HERDR_PANES_AUTO_CLOSE: "0",
 			OMP_HERDR_PANES_MAX: "3",
 		}),
-	).toEqual({ mainPaneId: "w1:p1", ratio: 0.5, closeDelayMs: 0, failCloseDelayMs: 60000, maxPanes: 3 });
+	).toEqual({ mainPaneId: "w1:p1", ratio: 0.5, autoClose: false, closeDelayMs: 0, failCloseDelayMs: 60000, maxPanes: 3 });
 	expect(readConfig({ HERDR_PANE_ID: "w1:p1", OMP_HERDR_PANES_RATIO: "0.2" })?.ratio).toBe(0.2);
 	expect(readConfig({ HERDR_PANE_ID: "w1:p1", OMP_HERDR_PANES_RATIO: "0.9" })?.ratio).toBe(0.9);
 });
@@ -56,6 +58,7 @@ test("readConfig falls back per field on invalid values", () => {
 		mainPaneId: "w1:p1",
 		ratio: 0.6,
 		closeDelayMs: 3000,
+		autoClose: true,
 		failCloseDelayMs: 10000,
 		maxPanes: 6,
 	});
@@ -63,6 +66,7 @@ test("readConfig falls back per field on invalid values", () => {
 	expect(readConfig({ HERDR_PANE_ID: "w1:p1", OMP_HERDR_PANES_RATIO: "0.05" })?.ratio).toBe(0.6);
 	expect(readConfig({ HERDR_PANE_ID: "w1:p1", OMP_HERDR_PANES_RATIO: "1" })?.ratio).toBe(0.6);
 	expect(readConfig({ HERDR_PANE_ID: "w1:p1", OMP_HERDR_PANES_MAX: "0" })?.maxPanes).toBe(6);
+	expect(readConfig({ HERDR_PANE_ID: "w1:p1", OMP_HERDR_PANES_AUTO_CLOSE: "1" })?.autoClose).toBe(true);
 	expect(readConfig({ HERDR_PANE_ID: "w1:p1", OMP_HERDR_PANES_MAX: "-2" })?.maxPanes).toBe(6);
 	// A broken value must not leak into the fields that are fine.
 	const partial = readConfig({ HERDR_PANE_ID: "w1:p1", OMP_HERDR_PANES_RATIO: "nope", OMP_HERDR_PANES_MAX: "2" });

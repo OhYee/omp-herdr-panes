@@ -6,87 +6,84 @@ Watch your [omp](https://github.com/oh-my-pi) subagents work live, each in its o
 When omp spawns subagents, their work normally happens out of sight: you get a progress line and,
 at the end, a result. This extension gives every subagent a **read-only pane** next to your omp
 pane that streams its task, thinking, tool calls, and results as they happen. A pane closes by
-itself a few seconds after its subagent finishes, and your omp pane goes back to full width.
-
-![omp in the left pane with two subagents, T009Templates and T011Assets, streaming live in stacked panes on the right](docs/screenshot.png)
-
-*omp on the left; two running subagents, each in its own stacked pane on the right.*
+itself by default a few seconds after its subagent finishes, and your omp pane goes back to full width.
 
 ## What you get
 
 - **One pane per subagent**, stacked in a single column to the right of omp and titled
   `<name> · <agent>`.
-- **Live output**: task prompt, a short preview of the thinking, tool calls with their intent,
-  results tagged with their tool name, and errors, updated as the subagent writes its transcript.
-  When the subagent ends, a summary line shows its tokens, cost and duration.
+- **Interactive transcript**: inspect full input, thinking, tool calls, tool results, errors and
+  output. Expand or collapse each item and scroll without sending input to the subagent.
+  Thinking, tool calls, tool results and errors start collapsed.
+  Thinking uses the terminal's default foreground; input is magenta, tool calls blue, tool results
+  cyan, output green, and other items yellow. Code and tool arguments retain syntax highlighting.
+  Consecutive thinking blocks are merged. Consecutive tool calls form a collapsed `TOOLS: N`
+  group. A call and its matching result share one expandable item, matched by tool call ID;
+  results without an unambiguous match remain separate.
+- **Live updates**: assistant text, thinking and tool-call snapshots stream from omp events;
+  completed messages and tool results are read from the session transcript.
 - **Nested subagents too**: a subagent that spawns its own subagents gets panes for them as well
   (e.g. `Outer · task` and `Outer.Inner · sonic`).
 - **Outcome at a glance**: when a subagent ends, its pane title gets a `✓` (completed) or `✗`
   (failed, aborted) prefix.
-- **Automatic cleanup**: a pane closes ~3 s after its subagent completes, ~10 s after it fails;
-  quitting omp closes them all, and if omp is killed the panes close by themselves within a second.
+- **Configurable cleanup**: by default a pane closes ~3 s after completion or ~10 s after failure.
+  You can adjust the delays or keep finished panes open; exiting omp still closes its panes.
 - **Stays out of your way**: keyboard focus never leaves the omp pane, and you can keep typing
   while subagents run.
 - **No effect outside Herdr**: if omp is not running inside a Herdr pane, the extension does
   nothing at all.
 
-The panes are for watching only. You can't type into a subagent from its pane.
+The panes are read-only observers. Their keyboard controls only affect the viewer, not the subagent.
 
 ## Requirements
 
 - [omp](https://github.com/oh-my-pi) ≥ 18.3.1
 - [Herdr](https://herdr.dev) ≥ 0.9.1
 - omp started **inside a Herdr pane** (`echo $HERDR_PANE_ID` prints a pane id)
+- [Bun](https://bun.sh) on the OMP process's `PATH` (used for the read-only pane viewer)
 
-No other runtime or `npm install` is needed. The pane viewer runs on the Bun runtime embedded in
-the `omp` binary.
+No `npm install` is needed. The pane viewer runs with standalone Bun so Herdr does not list it as an OMP agent.
 
 ## Install
 
-1. Clone the repository anywhere, for example:
-
-   ```sh
-   git clone https://github.com/bekto/omp-herdr-panes.git ~/omp-herdr-panes
-   ```
-
-2. Add that directory to `~/.omp/agent/config.yml`:
-
-   ```yaml
-   extensions:
-     - ~/omp-herdr-panes
-   ```
-
-   If you already have an `extensions:` list, add the line to it.
-
-3. Start omp inside a Herdr pane. That's it.
-
-To try it once without changing your config:
+Install directly from the maintained GitHub repository:
 
 ```sh
-omp -e ~/omp-herdr-panes/src/index.ts
+omp plugin install github:OhYee/omp-herdr-panes
 ```
 
-### Let your agent set it up
+For local development, link a checkout instead:
 
-Paste this prompt into omp (or any coding agent with shell access):
+```sh
+omp plugin link /absolute/path/to/omp-herdr-panes
+```
 
-```text
-Install the omp extension omp-herdr-panes for me:
-1. Clone https://github.com/bekto/omp-herdr-panes.git into ~/omp-herdr-panes
-   (if that directory already exists, run `git pull` there instead).
-2. Edit ~/.omp/agent/config.yml: if it has an `extensions:` list, add `- ~/omp-herdr-panes`
-   to it unless it is already there; if it has none, append
-   `extensions:` with that single item. Do not change or reorder any other keys.
-3. Show me the resulting config.yml diff.
-4. Run `echo $HERDR_PANE_ID` and tell me whether this omp is running inside a Herdr pane.
-Then tell me to restart omp inside a Herdr pane to activate the extension.
+Restart omp inside a Herdr pane to activate it. To try it once without installing:
+
+```sh
+omp -e /absolute/path/to/omp-herdr-panes/src/index.ts
 ```
 
 ## Usage
 
-Use omp normally. Whenever it runs the task tool (for example "spawn three sonic agents to
-check X, Y and Z", or omp decides to delegate on its own), a pane opens for each subagent and
-closes after the subagent finishes.
+Use omp normally. Whenever it runs the task tool, a pane opens for each subagent. Focus the
+pane to select items with `↑`/`↓` or `j`/`k`, toggle with Enter or Space, and collapse/expand
+with `h`/`l`. `Ctrl+U`/`Ctrl+D` scroll half a page and move the selection with the viewport;
+`PgUp`/`PgDn` scroll a full page, and `gg`/`G` jump to the beginning/end. `f` follows the
+latest output, `a` toggles all items, and `t` toggles all THINK blocks, including future ones.
+You can also click an item header to toggle it or use the mouse wheel to scroll. Press
+**Ctrl+C** to close the viewer.
+
+The viewer can also open an existing OMP session independently, by ID or ID prefix:
+
+```sh
+bun /absolute/path/to/omp-herdr-panes/src/viewer.ts 01a1dfc5
+```
+
+For a custom session root, add `--session-dir /path/to/sessions`. A JSONL file path is also
+accepted directly. Ambiguous or missing IDs are reported rather than silently choosing a session.
+When opened independently, the viewer follows persisted file updates; it cannot receive
+unpersisted live events unless launched by the plugin with its private event connection.
 
 ## Configuration
 
@@ -95,27 +92,31 @@ Set these environment variables before starting omp. They are read once, when th
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `OMP_HERDR_PANES` | `1` | `0` turns the extension off |
+| `OMP_HERDR_PANES_AUTO_CLOSE` | `1` | `0` keeps finished panes open until manually closed or omp exits |
 | `OMP_HERDR_PANES_RATIO` | `0.6` | share of the width kept by the omp pane when the column opens (`0.2`–`0.9`) |
 | `OMP_HERDR_PANES_CLOSE_DELAY_MS` | `3000` | how long a pane stays open after its subagent completes |
 | `OMP_HERDR_PANES_FAIL_DELAY_MS` | `10000` | how long a pane stays open after its subagent fails or is aborted |
-| `OMP_HERDR_PANES_MAX` | `6` | max panes open at once; extra subagents wait for a slot (a finished pane gives up its slot right away) |
+| `OMP_HERDR_PANES_MAX` | `6` | max panes open at once; extra subagents wait until a pane closes |
 
 An invalid value falls back to that variable's default.
 
 ```sh
-OMP_HERDR_PANES_MAX=4 OMP_HERDR_PANES_CLOSE_DELAY_MS=10000 omp
+OMP_HERDR_PANES_AUTO_CLOSE=0 omp
+# Or keep successful panes for 30 seconds and failed panes for 60 seconds:
+OMP_HERDR_PANES_CLOSE_DELAY_MS=30000 OMP_HERDR_PANES_FAIL_DELAY_MS=60000 omp
 ```
 
 ## Uninstall
 
 - Turn it off for now: start omp with `OMP_HERDR_PANES=0`.
-- Remove it: delete its line from the `extensions:` list in `~/.omp/agent/config.yml`, then
-  delete the cloned directory. It leaves no state, caches, or background services behind.
+
+- Remove the link with `omp plugin uninstall omp-herdr-panes`. If configured manually, remove its
+  `extensions:` entry instead. The checked-out source directory is not deleted automatically.
 
 ## Performance
 
-- The extension adds no model calls or tokens and does not change subagent behaviour. It only reads
-  the transcripts omp already writes to disk.
+- The extension adds no model calls or tokens and does not change subagent behaviour. It reads
+  the existing transcript and forwards subagent event snapshots over a private local socket.
 - Opening or closing a pane runs a few short `herdr` CLI commands, one after another, without
   blocking omp. A herdr call that hangs is killed after 5 s.
 - Each open pane runs one small viewer process that tails a file, polling every 250 ms while the
@@ -124,22 +125,21 @@ OMP_HERDR_PANES_MAX=4 OMP_HERDR_PANES_CLOSE_DELAY_MS=10000 omp
 ## How it works
 
 ```
-omp session ── task:subagent:lifecycle event ──▶ src/index.ts
-                                                     │
-                                          src/pane-manager.ts (one per omp process)
-                                                     │  herdr pane split / rename / run / close
-                                                     ▼
-                                    Herdr pane: src/viewer.ts <subagent transcript.jsonl>
-                                                     └─ tails the JSONL, renders via src/render.ts
+omp session ── lifecycle and subagent events ──▶ src/index.ts
+                                                   │
+                        pane manager ── herdr ──▶ Herdr pane: src/viewer.ts
+                                                   │           │
+                        private live-event socket ──┘           └─ follows session JSONL
 ```
 
 - The extension listens for omp's `task:subagent:lifecycle` events. `started` opens a pane; any
   other status (completed, failed, aborted) marks the title and schedules the close.
 - The first pane is split off the omp pane to the right. Each later pane is split downwards off
   the tallest pane in the column.
-- Each pane runs `src/viewer.ts`, which follows the subagent's transcript file and prints each new
-  entry. Control and escape sequences in transcript text are stripped, so tool output can't
-  restyle or retitle the pane. The viewer exits when the omp process is gone.
+- Each pane runs `src/viewer.ts`. The viewer follows the transcript and receives temporary live
+  snapshots over an authenticated Unix socket in a private directory. The file remains the source
+  of truth; if live events are unavailable, the viewer continues following saved entries.
+  Terminal control sequences in transcript content are stripped. The viewer exits when omp exits.
 - All herdr commands are queued and run one at a time, so subagents started together never race
   each other's splits. Any herdr failure is caught and skipped, so it can't take down your omp
   session.
@@ -153,25 +153,28 @@ omp session ── task:subagent:lifecycle event ──▶ src/index.ts
 - **Replay an old transcript** to see what a pane would show:
 
   ```sh
-  BUN_BE_BUN=1 omp src/viewer.ts path/to/Subagent.jsonl --title demo
+  bun /absolute/path/to/omp-herdr-panes/src/viewer.ts path/to/Subagent.jsonl --title demo
   ```
 
 ## Development
 
 ```sh
-npm install                 # dev dependencies only: typescript, @types/bun
+npm install                 # optional dev dependencies: typescript, @types/bun
 npx tsc --noEmit            # typecheck
-BUN_BE_BUN=1 omp test       # run the tests (bun:test via omp's embedded Bun)
+bun test                    # run the tests
 ```
 
 | File | Role |
 | --- | --- |
-| `src/index.ts` | extension entry: wires omp lifecycle events to the pane manager |
+| `src/index.ts` | extension entry: connects lifecycle and streaming events |
 | `src/config.ts` | env-var config, lifecycle payload parsing, shell quoting |
 | `src/pane-manager.ts` | stacked-pane layout, serialized herdr calls, delayed close |
 | `src/herdr.ts` | thin, typed wrapper around the `herdr` CLI |
-| `src/viewer.ts` | the program running inside each pane |
-| `src/render.ts` | turns transcript entries into terminal lines |
+| `src/viewer.ts` | viewer process, transcript tailing and live socket client |
+| `src/tui.ts`, `src/tui-model.ts` | interactive display, folding and transcript model |
+| `src/session-file.ts` | resolve a session ID or prefix to its transcript |
+| `src/live-bridge.ts`, `src/live-events.ts` | private socket and coalesced live snapshots |
+| `src/render.ts` | plain output fallback and shared sanitization |
 | `src/line-splitter.ts` | UTF-8-safe incremental line splitting |
 | `src/omp-types.ts` | the small subset of omp's extension API this project uses |
 
