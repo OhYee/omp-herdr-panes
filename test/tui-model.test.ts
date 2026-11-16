@@ -196,6 +196,44 @@ test("matches a live call with an earlier saved result and keeps its expansion w
 	expect(model.all[0]?.result?.body).toBe("finished");
 });
 
+test("groups saved and live execution starts with their matching call and result", () => {
+	const model = new TranscriptModel();
+	const call = [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "a.ts" } }];
+	model.appendLiveEvent("tool_execution_start", JSON.stringify({ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", source: "live" }));
+	model.append({ type: "custom", customType: "tool_execution_start", data: { toolCallId: "call-1", toolName: "read", startedAt: "now" } });
+	model.append(message("toolResult", "finished", { toolCallId: "call-1", toolName: "read" }));
+	expect(model.all.map(card => card.kind)).toEqual(["execution", "execution", "result"]);
+	model.setLive(call);
+	expect(model.all.map(card => card.kind)).toEqual(["tool"]);
+	expect(model.all[0]?.execution?.map(card => card.title)).toEqual(["EVENT tool_execution_start", "ENTRY custom tool_execution_start"]);
+	expect(model.all[0]?.result?.body).toBe("finished");
+	model.toggleAll();
+	expect(model.all[0]?.expanded).toBe(true);
+	model.toggleAll();
+	expect(model.all[0]?.expanded).toBe(false);
+	model.clearLive();
+	model.append(message("assistant", call));
+	expect(model.all.map(card => card.kind)).toEqual(["tool"]);
+	expect(model.all[0]?.execution).toHaveLength(2);
+	expect(model.all[0]?.result?.body).toBe("finished");
+});
+
+test("leaves starts with missing or ambiguous call IDs visible as separate cards", () => {
+	const model = new TranscriptModel();
+	model.append(message("assistant", [
+		{ type: "toolCall", id: "duplicate", name: "read", arguments: {} },
+		{ type: "toolCall", id: "duplicate", name: "read", arguments: {} },
+	]));
+	model.append({ type: "custom", customType: "tool_execution_start", data: { toolCallId: "duplicate" } });
+	model.append({ type: "custom", customType: "tool_execution_start", data: { toolName: "grep" } });
+	model.appendLiveEvent("tool_execution_start", '{"toolCallId":');
+	model.toggleTools();
+	expect(model.all.map(card => card.kind)).toEqual(["tools", "tool", "tool", "execution", "execution", "execution"]);
+	expect(model.all[1]?.execution).toBeUndefined();
+	expect(model.all.slice(3).every(card => card.expanded)).toBe(true);
+	expect(model.all[5]?.body).toBe('{"toolCallId":');
+});
+
 test("toggle-all still collapses a paired call after expanding it", () => {
 	const model = new TranscriptModel();
 	model.append(message("assistant", [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }]));
@@ -273,6 +311,62 @@ test("toggleThinking applies to new and just-finished live thinking", () => {
 	expect(model.all[2]?.expanded).toBe(true);
 	model.toggleThinking();
 	expect(model.all.filter(card => card.kind === "thinking").map(card => card.expanded)).toEqual([false, false]);
+});
+
+test("toggleTools expands grouped calls and results without changing thinking", () => {
+	const model = new TranscriptModel();
+	model.append(message("assistant", [
+		{ type: "thinking", thinking: "analysis" },
+		{ type: "toolCall", id: "one", name: "read", arguments: { path: "a" } },
+		{ type: "toolCall", id: "two", name: "grep", arguments: { pattern: "b" } },
+	]));
+	model.append(message("toolResult", [{ type: "text", text: "read output" }], { toolCallId: "one", toolName: "read" }));
+	model.append(message("toolResult", [{ type: "text", text: "unpaired output" }], { toolName: "other" }));
+	model.toggleTools();
+	expect(model.all.map(card => [card.kind, card.expanded])).toEqual([
+		["thinking", false], ["tools", true], ["tool", true], ["tool", true], ["result", true],
+	]);
+	expect(model.all[2]?.result?.body).toBe("read output");
+	model.selected = 2;
+	model.toggleTools();
+	expect(model.all.map(card => [card.kind, card.expanded])).toEqual([["thinking", false], ["tools", false]]);
+	expect(model.all[model.selected]?.kind).toBe("tools");
+});
+
+test("toggleTools controls new tools and preserves expansion through live persistence", () => {
+	const model = new TranscriptModel();
+	const calls = [
+		{ type: "toolCall", id: "one", name: "read", arguments: {} },
+		{ type: "toolCall", id: "two", name: "grep", arguments: {} },
+	];
+	model.setLive(calls);
+	model.clearLive();
+	model.toggleTools();
+	model.append(message("assistant", calls));
+	expect(model.all.map(card => [card.kind, card.expanded])).toEqual([["tools", true], ["tool", true], ["tool", true]]);
+	model.append(message("assistant", [{ type: "text", text: "done" }]));
+	model.setLive([{ type: "toolCall", name: "bash", arguments: { command: "pwd" } }]);
+	expect(model.all.at(-1)?.expanded).toBe(true);
+	model.toggleTools();
+	expect(model.all.filter(card => card.kind === "tools" || card.kind === "tool").every(card => !card.expanded)).toBe(true);
+});
+
+test("unrecognized entries, message roles and assistant blocks have expandable JSON fallbacks", () => {
+	const model = new TranscriptModel();
+	model.append({ type: "custom", customType: "peer_message", data: { text: "hello" } });
+	model.append(message("new_role", { nested: "details" }));
+	model.append(message("assistant", [{ type: "new_block", payload: "hello" }, "raw block"]));
+	expect(model.all.map(card => card.title)).toEqual(["ENTRY custom peer_message", "MESSAGE new_role", "BLOCK new_block", "BLOCK unknown"]);
+	expect(model.all.every(card => !card.expanded)).toBe(true);
+	expect(model.all[0]?.body).toContain('"text": "hello"');
+	expect(model.all[2]?.body).toContain('"payload": "hello"');
+	expect(model.all[3]?.body).toBe('"raw block"');
+	model.setLive([{ type: "unknown_live_block", originalType: "new_block", preview: '{"payload":"live"}' }]);
+	expect(model.all.at(-1)?.title).toBe("BLOCK new_block");
+	expect(model.all.at(-1)?.body).toContain('"payload":"live"');
+	model.appendLiveEvent("new_event", '{"source":"live"}');
+	expect(model.cards.at(-1)?.title).toBe("EVENT new_event");
+	expect(model.cards.at(-1)?.body).toContain('"source":"live"');
 });
 
 test("labels remove terminal control sequences while preserving Chinese text", () => {

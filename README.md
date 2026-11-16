@@ -21,6 +21,8 @@ itself by default a few seconds after its subagent finishes, and your omp pane g
   Consecutive thinking blocks are merged. Consecutive tool calls form a collapsed `TOOLS: N`
   group. A call and its matching result share one expandable item, matched by tool call ID;
   results without an unambiguous match remain separate.
+  Matching `tool_execution_start` records and live events appear inside the same call; unmatched
+  or ambiguous records remain separate.
 - **Live updates**: assistant text, thinking and tool-call snapshots stream from omp events;
   completed messages and tool results are read from the session transcript.
 - **Nested subagents too**: a subagent that spawns its own subagents gets panes for them as well
@@ -35,6 +37,13 @@ itself by default a few seconds after its subagent finishes, and your omp pane g
   nothing at all.
 
 The panes are read-only observers. Their keyboard controls only affect the viewer, not the subagent.
+
+The transcript includes persisted user messages, assistant text and thinking, and tool calls and
+results. Other session records, message roles, assistant blocks and live events use an expandable
+JSON fallback. Live previews are bounded; oversized events show a truncation notice. If the viewer
+connects late, the bridge buffers up to 512 KiB of events and reports any overflow.
+Tool-approval and plan-review request/resolution hooks are shown when OMP emits them for the
+subagent. The viewer is read-only: answer approval dialogs in OMP, not in a pane.
 
 ## Requirements
 
@@ -71,7 +80,11 @@ Use omp normally. Whenever it runs the task tool, a pane opens for each subagent
 pane to select items with `↑`/`↓` or `j`/`k`, toggle with Enter or Space, and collapse/expand
 with `h`/`l`. `Ctrl+U`/`Ctrl+D` scroll half a page and move the selection with the viewport;
 `PgUp`/`PgDn` scroll a full page, and `gg`/`G` jump to the beginning/end. `f` follows the
-latest output, `a` toggles all items, and `t` toggles all THINK blocks, including future ones.
+latest output, `a` toggles all items, `t` toggles all THINK blocks, and `T` toggles all tool
+groups, calls and results. The THINK and tool settings also apply to future items. The viewer
+shows the session file path on the status line when space permits; status, stream, agent and model
+take priority. Press `p` to copy the full path using OSC 52. The terminal must permit OSC 52
+clipboard writes. The viewer reflows when its pane is resized.
 You can also click an item header to toggle it or use the mouse wheel to scroll. Press
 **Ctrl+C** to close the viewer.
 

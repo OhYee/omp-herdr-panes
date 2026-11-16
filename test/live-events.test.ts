@@ -58,3 +58,18 @@ test("large live previews are explicitly truncated without changing the saved tr
 	expect(JSON.stringify(frames)).toContain("Live preview truncated; full content appears when saved.");
 	live.close();
 });
+
+test("forwards unknown live events and unknown assistant blocks with bounded previews", () => {
+	const frames: Array<{ type: string; name?: string; text?: string; content?: unknown[] }> = [];
+	const clock = fakeSchedule();
+	const live = new LiveEvents({ publish: (_id, frame) => frames.push(frame as typeof frames[number]) }, clock.schedule);
+	live.handle({ id: "a", event: { type: "new_event", data: "hello" } });
+	live.handle({ id: "a", event: { type: "message_update", message: { role: "assistant", content: [{ type: "future_block", value: "payload" }] } } });
+	for (const callback of clock.callbacks) callback();
+	expect(frames[0]?.name).toBe("new_event");
+	expect(frames[0]?.text).toContain("hello");
+	expect(frames[1]?.content).toEqual([{ type: "unknown_live_block", originalType: "future_block", preview: '{\n  "type": "future_block",\n  "value": "payload"\n}' }]);
+	live.handle({ id: "a", event: { type: "large", data: "x".repeat(100_000) } });
+	expect(frames.at(-1)?.text).toContain("[Live event truncated.]");
+	live.close();
+});

@@ -21,6 +21,10 @@ export interface ExtensionAPI {
 		handler: (args: string, ctx: { ui: { notify(message: string, type: "info" | "error"): void } }) => void | Promise<void>;
 	}): void;
 	on(
+		event: "tool_approval_requested" | "tool_approval_resolved" | "plan_review_requested" | "plan_review_resolved",
+		handler: (event: unknown, ctx: { sessionManager: { getSessionFile(): string | undefined } }) => void,
+	): void;
+	on(
 		event: "session_shutdown",
 		handler: (event: unknown, ctx: unknown) => void | Promise<void>,
 	): void;

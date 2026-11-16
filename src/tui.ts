@@ -22,6 +22,22 @@ function ellipsize(value: string, width: number): string {
 	return `${clip(value, width - 1)}…`;
 }
 
+function ellipsizeStart(value: string, width: number): string {
+	if (width <= 0) return "";
+	if (Bun.stringWidth(value) <= width) return value;
+	const segments = Array.from(segmenter.segment(value), item => item.segment);
+	let suffix = "";
+	let remaining = width - 1;
+	for (let index = segments.length - 1; index >= 0; index--) {
+		const segment = segments[index]!;
+		const size = Bun.stringWidth(segment);
+		if (size > remaining) break;
+		suffix = segment + suffix;
+		remaining -= size;
+	}
+	return `…${suffix}`;
+}
+
 function ellipsizeModel(value: string, width: number): string {
 	if (Bun.stringWidth(value) <= width) return value;
 	const colon = value.lastIndexOf(":");
@@ -87,7 +103,7 @@ function highlightCode(text: string, base: string): string {
 interface Row { text: string; card: number; kind: CardKind; header: boolean; code?: boolean }
 
 const CARD_COLORS: Record<CardKind, string> = {
-	input: "35", thinking: "39", tools: "34", tool: "34", result: "36", output: "32", status: "33",
+	input: "35", thinking: "39", tools: "34", tool: "34", execution: "33", result: "36", output: "32", status: "33",
 };
 
 /** An interactive, read-only transcript pane with per-item folding. */
@@ -98,6 +114,7 @@ export class ViewerTui {
 	private stopped = false;
 	private inputBuffer = "";
 	private awaitingG = false;
+	private notice = "";
 	private readonly onInput = (chunk: Buffer | string) => {
 		this.inputBuffer += String(chunk);
 		const sequences = ["\u001b[A", "\u001b[B", "\u001b[5~", "\u001b[6~", "\u001b[H", "\u001b[F"];
@@ -120,7 +137,7 @@ export class ViewerTui {
 	};
 	private readonly onResize = () => this.requestRender();
 
-	constructor(readonly model: TranscriptModel, private readonly title: string, private readonly quit: () => void) {}
+	constructor(readonly model: TranscriptModel, private readonly title: string, private readonly sessionFile: string, private readonly quit: () => void) {}
 
 	start(): void {
 		process.stdout.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h");
@@ -149,8 +166,8 @@ export class ViewerTui {
 
 	private dimensions(): { width: number; height: number; available: number } {
 		const width = Math.max(1, process.stdout.columns || 80);
-		const height = Math.max(3, process.stdout.rows || 24);
-		return { width, height, available: Math.max(1, height - 3) };
+		const height = Math.max(1, process.stdout.rows || 24);
+		return { width, height, available: Math.max(0, height - 2) };
 	}
 
 	private rows(width: number): Row[] {
@@ -159,28 +176,37 @@ export class ViewerTui {
 		for (const [index, card] of this.model.all.entries()) {
 			if (card.kind === "tools") inTools = card.expanded;
 			else if (card.kind !== "tool" && card.kind !== "result") inTools = false;
-			const indent = inTools && (card.kind === "tool" || card.kind === "result") ? "  " : "";
+			const indent = inTools && width > 8 && (card.kind === "tool" || card.kind === "result") ? "  " : "";
 			const marker = card.expanded ? "▾" : "▸";
 			const preview = !card.expanded ? cardSummary(card.body.split(/\r?\n/u, 1)[0] ?? "") : "";
 			const outcome = card.result ? (card.result.error ? " · error" : " · ok") : "";
 			const label = `${indent}${index === this.model.selected ? ">" : " "} ${marker} ${cardSummary(card.title)}${outcome}${card.live ? " · live" : ""}`;
 			rows.push({ text: clip(preview ? `${label}  ${preview}` : label, width), card: index, kind: card.kind, header: true });
 			if (!card.expanded) continue;
-			if (card.kind === "tool" && card.result) {
-				const prefix = `${indent}    `;
+			if (card.kind === "tool" && (card.result || card.execution?.length)) {
+				const prefix = " ".repeat(Math.min(indent.length + 6, Math.max(0, width - 2)));
 				rows.push({ text: clip(`${prefix}REQUEST`, width), card: index, kind: "tool", header: false });
-				for (const line of wrap(card.body, Math.max(1, width - prefix.length - 2), true)) {
-					rows.push({ text: clip(`${prefix}  ${line.text}`, width), card: index, kind: "tool", header: false, code: line.code });
+				for (const line of wrap(card.body, Math.max(1, width - prefix.length), true)) {
+					rows.push({ text: clip(`${prefix}${line.text}`, width), card: index, kind: "tool", header: false, code: line.code });
 				}
-				rows.push({ text: clip(`${prefix}${card.result.error ? "ERROR" : "RESULT"}`, width), card: index, kind: "result", header: false });
-				for (const line of wrap(card.result.body, Math.max(1, width - prefix.length - 2))) {
-					rows.push({ text: clip(`${prefix}  ${line.text}`, width), card: index, kind: "result", header: false, code: line.code });
+				for (const execution of card.execution ?? []) {
+					rows.push({ text: clip(`${prefix}${execution.title}`, width), card: index, kind: "execution", header: false });
+					for (const line of wrap(execution.body, Math.max(1, width - prefix.length), true)) {
+						rows.push({ text: clip(`${prefix}${line.text}`, width), card: index, kind: "execution", header: false, code: line.code });
+					}
+				}
+				if (card.result) {
+					rows.push({ text: clip(`${prefix}${card.result.error ? "ERROR" : "RESULT"}`, width), card: index, kind: "result", header: false });
+					for (const line of wrap(card.result.body, Math.max(1, width - prefix.length))) {
+						rows.push({ text: clip(`${prefix}${line.text}`, width), card: index, kind: "result", header: false, code: line.code });
+					}
 				}
 				continue;
 			}
 			if (!card.body) continue;
-			for (const line of wrap(card.body, Math.max(1, width - 4 - indent.length), card.kind === "tool")) {
-				rows.push({ text: clip(`${indent}    ${line.text}`, width), card: index, kind: card.kind, header: false, code: line.code });
+			const prefix = " ".repeat(Math.min(indent.length + 4, Math.max(0, width - 2)));
+			for (const line of wrap(card.body, Math.max(1, width - prefix.length), card.kind === "tool")) {
+				rows.push({ text: clip(`${prefix}${line.text}`, width), card: index, kind: card.kind, header: false, code: line.code });
 			}
 		}
 		return rows;
@@ -229,7 +255,8 @@ export class ViewerTui {
 
 	private input(data: string): void {
 		if (data === "\u0003") { this.stop(); this.quit(); return; }
-		const rows = this.dimensions().available;
+		this.notice = "";
+		const rows = Math.max(1, this.dimensions().available);
 		if (data === "g") {
 			if (!this.awaitingG) { this.awaitingG = true; return; }
 			this.awaitingG = false;
@@ -250,6 +277,11 @@ export class ViewerTui {
 		}
 		else if (data === "a") this.model.toggleAll();
 		else if (data === "t") { this.model.toggleThinking(); this.selectedByUser = true; }
+		else if (data === "T") { this.model.toggleTools(); this.selectedByUser = true; }
+		else if (data === "p") {
+			process.stdout.write(`\x1b]52;c;${Buffer.from(this.sessionFile, "utf8").toString("base64")}\x07`);
+			this.notice = "Clipboard copy requested";
+		}
 		else if (data === "f" || data === "G" || data === "\u001b[F") { this.model.follow = true; this.model.selected = Math.max(0, this.model.all.length - 1); }
 		else if (data === "\u0015" || data === "\u0004") this.scrollWithSelection((data === "\u0015" ? -1 : 1) * Math.max(1, Math.floor(rows / 2)), rows);
 		else if (data === "\u001b[5~") { this.model.follow = false; this.top = Math.max(0, this.top - rows); }
@@ -275,9 +307,12 @@ export class ViewerTui {
 		const label = cardSummary(this.title) || "Subagent";
 		const stream = this.model.streamStatus ?? "file";
 		const status = header(cardSummary(this.model.status), stream, label, cardSummary(this.model.model) || "unknown", this.model.follow, width);
-		const hint = "Ctrl+C exit  t THINK  j/k select  h/l fold  ^U/^D scroll  gg/G";
-		const screen: string[] = [status];
-		if (rows.length === 0) screen.push(clip("Waiting for transcript…", width));
+		const space = width - Bun.stringWidth(Bun.stripANSI(status)) - 3;
+		const path = sanitize(this.sessionFile).replace(/\r?\n/gu, " ");
+		const title = space > 1 ? `${status} · ${ellipsizeStart(path, space)}` : status;
+		const hint = this.notice || "p copy path  T tools  t THINK  Ctrl+C exit  a all  j/k select  h/l fold  ^U/^D scroll  gg/G";
+		const screen: string[] = [title];
+		if (rows.length === 0 && available > 0) screen.push(clip("Waiting for transcript…", width));
 		for (const row of rows.slice(this.top, this.top + available)) {
 			const selected = row.header && row.card === this.model.selected;
 			const color = CARD_COLORS[row.kind];
@@ -286,7 +321,7 @@ export class ViewerTui {
 			screen.push(`${style}${text}\x1b[0m`);
 		}
 		while (screen.length < height - 1) screen.push("");
-		screen.push(`\x1b[33m${clip(hint, width)}\x1b[0m`);
+		if (height > 1) screen.push(`\x1b[33m${clip(hint, width)}\x1b[0m`);
 		process.stdout.write(`\x1b[H${screen.slice(0, height).map(line => `\x1b[2K${line}`).join("\r\n")}`);
 	}
 }

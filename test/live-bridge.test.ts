@@ -71,6 +71,33 @@ test("replays only the latest live snapshot and clears it", async () => {
 	}
 });
 
+test("buffers live events before the viewer connects and reports backlog overflow", async () => {
+	const bridge = new LiveBridge(() => {});
+	try {
+		const token = bridge.register("a");
+		bridge.publish("a", { type: "event", name: "first", text: "hello" });
+		for (let index = 0; index < 6; index++) bridge.publish("a", { type: "event", name: `event-${index}`, text: "x".repeat(100_000) });
+		const socket = await connect(bridge, hello(token));
+		const { promise, resolve, reject } = Promise.withResolvers<Array<{ type: string; name?: string; text?: string }>>();
+		let data = "";
+		socket.on("error", reject);
+		socket.on("data", (chunk: Buffer) => {
+			data += chunk.toString("utf8");
+			const lines = data.split("\n");
+			if (lines.length >= 9) resolve(lines.slice(0, -1).map(line => JSON.parse(line)));
+		});
+		const frames = await promise;
+		expect(frames[0]).toEqual({ type: "event", name: "first", text: "hello" });
+		expect(frames.slice(1, 6).map(frame => frame.name)).toEqual(["event-0", "event-1", "event-2", "event-3", "event-4"]);
+		expect(frames[6]?.name).toBe("backlog_overflow");
+		expect(frames[6]?.text).toContain("1 live events");
+		expect(frames[7]).toEqual({ type: "ready" });
+		socket.destroy();
+	} finally {
+		await bridge.close();
+	}
+});
+
 test("isolates each agent and broadcasts to all its viewers", async () => {
 	const bridge = new LiveBridge(() => {});
 	try {

@@ -24,7 +24,11 @@ export class LiveEvents {
 		const frame = recordOf(payload);
 		const id = frame?.["id"];
 		const event = recordOf(frame?.["event"]);
-		if (typeof id !== "string" || !event) return;
+		if (typeof id !== "string") return;
+		if (!event) {
+			this.sink.publish(id, { type: "event", name: "unknown", text: preview(frame?.["event"]) });
+			return;
+		}
 		const message = recordOf(event["message"]);
 		if (event["type"] === "message_start" && message?.["role"] === "assistant") {
 			this.clear(id);
@@ -34,11 +38,19 @@ export class LiveEvents {
 			this.clear(id);
 			return;
 		}
-		if (event["type"] !== "message_update" || message?.["role"] !== "assistant") return;
+		if (event["type"] !== "message_update" || message?.["role"] !== "assistant") {
+			if ((event["type"] === "message_start" || event["type"] === "message_end") &&
+				(message?.["role"] === "user" || message?.["role"] === "toolResult")) return;
+			this.sink.publish(id, { type: "event", name: typeof event["type"] === "string" ? event["type"] : "unknown", text: preview(event) });
+			return;
+		}
 		const delta = recordOf(event["assistantMessageEvent"]);
 		const partial = recordOf(delta?.["partial"]);
 		const content = Array.isArray(partial?.["content"]) ? partial["content"] : message["content"];
-		if (!Array.isArray(content)) return;
+		if (!Array.isArray(content)) {
+			this.sink.publish(id, { type: "event", name: "message_update", text: preview(event) });
+			return;
+		}
 		const pending = this.pending.get(id) ?? { content: [] };
 		pending.content = content;
 		if (!pending.timer) {
@@ -64,26 +76,37 @@ export class LiveEvents {
 	}
 }
 
+function preview(value: unknown): string {
+	let text: string;
+	try { text = JSON.stringify(value, null, 2) ?? String(value); } catch { text = "[Unserializable live event]"; }
+	const limit = 64 * 1024;
+	return text.length > limit ? `${text.slice(0, limit)}\n[Live event truncated.]` : text;
+}
+
 function snapshot(content: unknown[]): unknown[] {
 	let budget = PREVIEW_LIMIT;
 	const blocks: unknown[] = [];
 	for (const raw of content) {
 		const block = recordOf(raw);
-		if (!block) continue;
-		const type = block["type"];
-		if (type === "text" || type === "thinking") {
+		const type = block?.["type"];
+		if ((type === "text" || type === "thinking") &&
+			typeof block?.[type === "text" ? "text" : "thinking"] === "string") {
 			const field = type === "text" ? "text" : "thinking";
-			const value = block[field];
-			if (typeof value !== "string") continue;
+			const value = block![field] as string;
 			const shown = value.length > budget ? `${value.slice(0, Math.max(0, budget))}\n[Live preview truncated; full content appears when saved.]` : value;
 			blocks.push({ type, [field]: shown });
 			budget -= Math.min(value.length, budget);
-		} else if (type === "toolCall" && typeof block["name"] === "string") {
+		} else if (type === "toolCall" && typeof block?.["name"] === "string") {
 			const args = block["arguments"];
 			let serialized = "";
 			try { serialized = JSON.stringify(args) ?? ""; } catch { serialized = ""; }
 			const shownArgs = serialized.length > budget ? "[Live arguments truncated; full content appears when saved.]" : args;
 			blocks.push({ type, id: block["id"], name: block["name"], intent: block["intent"], arguments: shownArgs });
+			budget -= Math.min(serialized.length, budget);
+		} else {
+			const serialized = preview(raw);
+			const shown = serialized.length > budget ? `${serialized.slice(0, Math.max(0, budget))}\n[Live preview truncated; full content appears when saved.]` : serialized;
+			blocks.push({ type: "unknown_live_block", originalType: type, preview: shown });
 			budget -= Math.min(serialized.length, budget);
 		}
 		if (budget <= 0) {

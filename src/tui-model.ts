@@ -1,6 +1,6 @@
 import { recordOf, sanitize, summarizeArgs } from "./render.ts";
 
-export type CardKind = "input" | "thinking" | "tools" | "tool" | "result" | "output" | "status";
+export type CardKind = "input" | "thinking" | "tools" | "tool" | "execution" | "result" | "output" | "status";
 
 export interface Card {
 	id: string;
@@ -12,14 +12,15 @@ export interface Card {
 	live?: boolean;
 	toolCallId?: string;
 	result?: Card;
+	execution?: Card[];
 }
 
 function textOf(content: unknown): string {
 	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
+	if (!Array.isArray(content)) return pretty(content);
 	return content.map((block) => {
 		const item = recordOf(block);
-		if (item === null) return "";
+		if (item === null) return pretty(block);
 		if (item["type"] === "text" && typeof item["text"] === "string") return item["text"];
 		if (item["type"] === "image") return "[image]";
 		return pretty(item);
@@ -32,7 +33,11 @@ function pretty(value: unknown): string {
 
 function cardForBlock(block: unknown, id: string, live: boolean, expanded?: boolean): Card | undefined {
 	const item = recordOf(block);
-	if (!item) return undefined;
+	if (!item) return { id, kind: "status", title: "BLOCK unknown", body: pretty(block), expanded: expanded ?? false, live };
+	if (item["type"] === "unknown_live_block" && typeof item["preview"] === "string") {
+		const type = typeof item["originalType"] === "string" ? item["originalType"] : "unknown";
+		return { id, kind: "status", title: `BLOCK ${type}`, body: item["preview"], expanded: expanded ?? false, live };
+	}
 	if (item["type"] === "thinking" && typeof item["thinking"] === "string") {
 		return { id, kind: "thinking", title: "THINK", body: item["thinking"], expanded: expanded ?? false, live };
 	}
@@ -51,7 +56,7 @@ function cardForBlock(block: unknown, id: string, live: boolean, expanded?: bool
 		return { id, kind: "tool", title, body: pretty(args), expanded: expanded ?? false, live,
 			toolCallId: typeof item["id"] === "string" && item["id"] ? item["id"] : undefined };
 	}
-	return undefined;
+	return { id, kind: "status", title: `BLOCK ${typeof item["type"] === "string" ? item["type"] : "unknown"}`, body: pretty(item), expanded: expanded ?? false, live };
 }
 
 function appendCard(cards: Card[], card: Card): void {
@@ -73,6 +78,7 @@ export class TranscriptModel {
 	model = "";
 	private sequence = 0;
 	private thinkingExpanded = false;
+	private toolsExpanded = false;
 	private lastLiveExpansion = new Map<string, boolean>();
 	private readonly toolGroups = new Map<string, Card>();
 	private boundaryThinking?: { savedId: string; liveId: string; card: Card };
@@ -95,7 +101,7 @@ export class TranscriptModel {
 		const calls = new Map<string, Card | null>();
 		const results = new Map<string, Card | null>();
 		for (const card of cards) {
-			if (card.kind === "tool") card.result = undefined;
+			if (card.kind === "tool") { card.result = undefined; card.execution = undefined; }
 			const index = card.kind === "tool" ? calls : card.kind === "result" ? results : undefined;
 			if (index && card.toolCallId) index.set(card.toolCallId, index.has(card.toolCallId) ? null : card);
 		}
@@ -105,6 +111,13 @@ export class TranscriptModel {
 			if (!call || !result) continue;
 			call.result = result;
 			paired.add(result);
+		}
+		for (const card of cards) {
+			if (card.kind !== "execution" || !card.toolCallId) continue;
+			const call = calls.get(card.toolCallId);
+			if (!call) continue;
+			(call.execution ??= []).push(card);
+			paired.add(card);
 		}
 		let length = 0;
 		for (const card of cards) if (!paired.has(card)) cards[length++] = card;
@@ -125,7 +138,7 @@ export class TranscriptModel {
 			const id = `tools:${first.id}`;
 			let group = this.toolGroups.get(id);
 			if (!group) {
-				group = { id, kind: "tools", title: "", body: "", expanded: false };
+				group = { id, kind: "tools", title: "", body: "", expanded: this.toolsExpanded };
 				this.toolGroups.set(id, group);
 			}
 			group.title = `TOOLS: ${count}`;
@@ -139,7 +152,7 @@ export class TranscriptModel {
 
 	append(entry: unknown): boolean {
 		const record = recordOf(entry);
-		if (!record) return false;
+		if (!record) return this.appendFallback("ENTRY unknown", entry);
 		if (record["type"] === "session_init") {
 			this.agent = typeof record["agent"] === "string" ? record["agent"] : "";
 			if (typeof record["resolvedModel"] === "string" && record["resolvedModel"]) this.model = record["resolvedModel"];
@@ -152,16 +165,28 @@ export class TranscriptModel {
 				this.model = record["model"];
 				return true;
 			}
-			return false;
+			return this.appendFallback("ENTRY model_change", record);
 		}
 		if (record["type"] === "custom" && record["customType"] === "session_exit") {
 			if (this.status === "waiting" || this.status === "running") this.status = "ended";
 			this.live = [];
 			return true;
 		}
-		if (record["type"] !== "message") return false;
+		if (record["type"] === "custom" && record["customType"] === "tool_execution_start") {
+			const data = recordOf(record["data"]);
+			const toolCallId = typeof data?.["toolCallId"] === "string" && data["toolCallId"] ? data["toolCallId"] : undefined;
+			this.cards.push({ id: `entry-${this.sequence++}`, kind: "execution", title: "ENTRY custom tool_execution_start",
+				body: pretty(record), expanded: this.toolsExpanded, toolCallId });
+			if (this.follow) this.selected = Math.max(0, this.all.length - 1);
+			return true;
+		}
+		if (record["type"] !== "message") {
+			const type = typeof record["type"] === "string" ? record["type"] : "unknown";
+			const detail = typeof record["customType"] === "string" ? ` ${record["customType"]}` : "";
+			return this.appendFallback(`ENTRY ${type}${detail}`, record);
+		}
 		const message = recordOf(record["message"]);
-		if (!message) return false;
+		if (!message) return this.appendFallback("MESSAGE unknown", record);
 		const role = message["role"];
 		let modelChanged = false;
 		if (!this.model && role === "assistant" && typeof message["model"] === "string" && message["model"]) {
@@ -171,7 +196,7 @@ export class TranscriptModel {
 		}
 		const id = typeof record["id"] === "string" ? record["id"] : `entry-${this.sequence++}`;
 		const added: Card[] = [];
-		if (role === "user") {
+		if (role === "user" && message["content"] !== undefined) {
 			added.push({ id, kind: "input", title: "INPUT", body: textOf(message["content"]), expanded: true });
 		} else if (role === "assistant" && Array.isArray(message["content"])) {
 			const liveExpansion = new Map(this.live.map(card => [`${card.id}:${card.kind}`, card.expanded]));
@@ -180,7 +205,7 @@ export class TranscriptModel {
 				if (card) {
 					const key = `live:${index}:${card.kind}`;
 					card.expanded = liveExpansion.get(key) ?? this.lastLiveExpansion.get(key) ??
-						(card.kind === "thinking" ? this.thinkingExpanded : card.expanded);
+						(card.kind === "thinking" ? this.thinkingExpanded : card.kind === "tool" ? this.toolsExpanded : card.expanded);
 					if (card.kind === "thinking" && this.boundaryThinking?.liveId === `live:${index}` &&
 						this.cards[this.cards.length - 1]?.id === this.boundaryThinking.savedId) {
 						this.cards[this.cards.length - 1]!.expanded = this.boundaryThinking.card.expanded;
@@ -203,16 +228,35 @@ export class TranscriptModel {
 				const error = typeof message["errorMessage"] === "string" ? message["errorMessage"] : String(message["stopReason"]);
 				added.push({ id: `${id}:error`, kind: "status", title: "ERROR", body: error, expanded: false, error: true });
 			}
-		} else if (role === "toolResult") {
+		} else if (role === "toolResult" && message["content"] !== undefined) {
 			const name = typeof message["toolName"] === "string" ? message["toolName"] : "tool";
 			const error = message["isError"] === true;
-			added.push({ id, kind: "result", title: `${error ? "ERROR" : "RESULT"} ${name}`, body: textOf(message["content"]), expanded: false, error,
+			added.push({ id, kind: "result", title: `${error ? "ERROR" : "RESULT"} ${name}`, body: textOf(message["content"]), expanded: this.toolsExpanded, error,
 				toolCallId: typeof message["toolCallId"] === "string" && message["toolCallId"] ? message["toolCallId"] : undefined });
-		} else return false;
+		} else return this.appendFallback(`MESSAGE ${typeof role === "string" ? role : "unknown"}`, record);
 		if (role === "user" && this.status === "ended") this.status = "running";
 		for (const card of added) appendCard(this.cards, card);
 		if (this.follow && added.length > 0) this.selected = Math.max(0, this.all.length - 1);
 		return added.length > 0 || modelChanged;
+	}
+
+	private appendFallback(title: string, value: unknown): boolean {
+		this.cards.push({ id: `entry-${this.sequence++}`, kind: "status", title, body: pretty(value), expanded: false });
+		if (this.follow) this.selected = Math.max(0, this.all.length - 1);
+		return true;
+	}
+
+	appendLiveEvent(type: string, text: string): void {
+		let toolCallId: string | undefined;
+		if (type === "tool_execution_start") {
+			try {
+				const event = recordOf(JSON.parse(text));
+				if (typeof event?.["toolCallId"] === "string" && event["toolCallId"]) toolCallId = event["toolCallId"];
+			} catch { /* Truncated or malformed events remain separately visible. */ }
+		}
+		this.cards.push({ id: `event-${this.sequence++}`, kind: type === "tool_execution_start" ? "execution" : "status",
+			title: `EVENT ${type}`, body: text, expanded: type === "tool_execution_start" && this.toolsExpanded, live: true, toolCallId });
+		if (this.follow) this.selected = Math.max(0, this.all.length - 1);
 	}
 
 	setLive(content: unknown[]): void {
@@ -222,7 +266,7 @@ export class TranscriptModel {
 			const card = cardForBlock(block, `live:${index}`, true);
 			if (!card) continue;
 			card.expanded = old.get(`${card.id}:${card.kind}`) ??
-				(card.kind === "thinking" ? this.thinkingExpanded : card.expanded);
+				(card.kind === "thinking" ? this.thinkingExpanded : card.kind === "tool" ? this.toolsExpanded : card.expanded);
 			appendCard(live, card);
 		}
 		this.live = live;
@@ -270,6 +314,36 @@ export class TranscriptModel {
 		if (this.boundaryThinking) this.boundaryThinking.card.expanded = expand;
 	}
 
+	toggleTools(): void {
+		const visible = this.all;
+		const selected = visible[this.selected];
+		let parentId: string | undefined;
+		if (selected?.kind === "tool" || selected?.kind === "result") {
+			for (let index = this.selected - 1; index >= 0; index--) {
+				const card = visible[index]!;
+				if (card.kind === "tools") { parentId = card.id; break; }
+				if (card.kind !== "tool" && card.kind !== "result") break;
+			}
+		}
+		const cards = [...this.cards, ...this.live];
+		const paired = new Set(cards.flatMap(card => [...(card.result ? [card.result] : []), ...(card.execution ?? [])]));
+		const tools = cards.filter(card => (card.kind === "tool" || card.kind === "result" || card.kind === "execution") && !paired.has(card));
+		const groups = visible.filter(card => card.kind === "tools");
+		const expand = tools.length || groups.length
+			? tools.some(card => !card.expanded) || groups.some(card => !card.expanded)
+			: !this.toolsExpanded;
+		this.toolsExpanded = expand;
+		for (const card of [...tools, ...groups]) card.expanded = expand;
+		for (const key of this.lastLiveExpansion.keys()) {
+			if (key.endsWith(":tool")) this.lastLiveExpansion.set(key, expand);
+		}
+		for (const key of this.lastLiveGroups.keys()) this.lastLiveGroups.set(key, expand);
+		const after = this.all;
+		let index = after.findIndex(card => card.id === selected?.id);
+		if (index < 0 && parentId) index = after.findIndex(card => card.id === parentId);
+		this.selected = index >= 0 ? index : Math.min(this.selected, Math.max(0, after.length - 1));
+	}
+
 	toggleAll(): void {
 		const visible = this.all;
 		const selected = visible[this.selected];
@@ -283,10 +357,14 @@ export class TranscriptModel {
 		}
 		const cards = [...this.cards, ...this.live];
 		const paired = new Set<Card>();
-		for (const card of cards) if (card.result) paired.add(card.result);
+		for (const card of cards) {
+			if (card.result) paired.add(card.result);
+			for (const execution of card.execution ?? []) paired.add(execution);
+		}
 		const actionable = cards.filter(card => !paired.has(card));
 		const expand = visible.some(card => !card.expanded) || actionable.some(card => !card.expanded);
 		this.thinkingExpanded = expand;
+		this.toolsExpanded = expand;
 		for (const card of visible) card.expanded = expand;
 		for (const card of actionable) card.expanded = expand;
 		const after = this.all;

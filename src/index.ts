@@ -31,6 +31,7 @@ let bridge: LiveBridge | undefined;
 let liveEvents: LiveEvents | undefined;
 let settings: PaneSettings | undefined;
 const viewerTokens = new Map<string, { token: string }>();
+const sessionAgents = new Map<string, string>();
 /** True once some factory call in this process claimed ownership (the first one is the parent). */
 let ownerClaimed = false;
 /** Unsubscribe function per event bus that already carries our lifecycle listener. */
@@ -77,6 +78,7 @@ export default function ompHerdrPanes(pi: ExtensionAPI): void {
 				if (event === null) return;
 				if (event.status === "started") {
 					if (!settings?.enabled && !manager?.has(event.sessionFile)) return;
+					sessionAgents.set(event.sessionFile, event.id);
 					// Validators may initialize the extension without sending session_shutdown.
 					if (!bridge) {
 						try {
@@ -100,6 +102,7 @@ export default function ompHerdrPanes(pi: ExtensionAPI): void {
 					liveEvents?.clear(event.id);
 					bridge?.publish(event.id, { type: "state", status: event.status });
 					bridge?.finish(event.id);
+					sessionAgents.delete(event.sessionFile);
 					const channel = viewerTokens.get(event.sessionFile);
 					if (channel) {
 						const timer = setTimeout(() => {
@@ -116,6 +119,14 @@ export default function ompHerdrPanes(pi: ExtensionAPI): void {
 		});
 		const unsubscribeEvents = pi.events.on("task:subagent:event", (data) => liveEvents?.handle(data));
 		subscriptions.set(pi.events, () => { unsubscribe(); unsubscribeEvents(); });
+	}
+
+	for (const name of ["tool_approval_requested", "tool_approval_resolved", "plan_review_requested", "plan_review_resolved"] as const) {
+		pi.on(name, (event, ctx) => {
+			const file = ctx.sessionManager.getSessionFile();
+			const id = file ? sessionAgents.get(file) : undefined;
+			if (id) liveEvents?.handle({ id, event });
+		});
 	}
 
 	if (isOwner) {
@@ -137,6 +148,7 @@ export default function ompHerdrPanes(pi: ExtensionAPI): void {
 			liveEvents = undefined;
 			bridge = undefined;
 			viewerTokens.clear();
+			sessionAgents.clear();
 			await manager?.closeAll();
 			manager = undefined;
 			settings = undefined;

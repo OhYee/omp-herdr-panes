@@ -6,6 +6,7 @@ import { join } from "node:path";
 const MAX_HANDSHAKE_BYTES = 1024;
 const MAX_FRAME_BYTES = 1024 * 1024;
 const MAX_PENDING_BYTES = 2 * 1024 * 1024;
+const MAX_EVENT_BACKLOG_BYTES = 512 * 1024;
 const MAX_CONNECTIONS = 64;
 const HANDSHAKE_TIMEOUT_MS = 5000;
 const FINISHED_TIMEOUT_MS = 5 * 60 * 1000;
@@ -14,6 +15,9 @@ type Agent = {
 	token: string;
 	clients: Set<Socket>;
 	snapshot?: string;
+	pendingEvents: string[];
+	pendingEventBytes: number;
+	droppedEvents: number;
 	finished: boolean;
 	timer?: NodeJS.Timeout;
 };
@@ -67,7 +71,7 @@ export class LiveBridge {
 			existing.finished = false;
 			return existing.token;
 		}
-		const agent: Agent = { token: randomBytes(32).toString("hex"), clients: new Set(), finished: false };
+		const agent: Agent = { token: randomBytes(32).toString("hex"), clients: new Set(), pendingEvents: [], pendingEventBytes: 0, droppedEvents: 0, finished: false };
 		this.agents.set(id, agent);
 		this.tokens.set(agent.token, agent);
 		return agent.token;
@@ -94,6 +98,17 @@ export class LiveBridge {
 		if (frame !== null && typeof frame === "object" && "type" in frame) {
 			if (frame.type === "live") agent.snapshot = line;
 			else if (frame.type === "clear") agent.snapshot = undefined;
+			else if (frame.type === "event" && "name" in frame && "text" in frame) {
+				let connected = false;
+				for (const socket of agent.clients) if (!socket.destroyed) { connected = true; break; }
+				if (!connected) {
+					const size = Buffer.byteLength(line);
+					if (agent.pendingEventBytes + size <= MAX_EVENT_BACKLOG_BYTES) {
+						agent.pendingEvents.push(line);
+						agent.pendingEventBytes += size;
+					} else agent.droppedEvents++;
+				}
+			}
 		}
 		for (const socket of agent.clients) this.send(socket, line);
 	}
@@ -179,6 +194,13 @@ export class LiveBridge {
 			clearTimeout(agent.timer);
 			agent.timer = undefined;
 			agent.clients.add(socket);
+			for (const line of agent.pendingEvents) this.send(socket, line);
+			agent.pendingEvents = [];
+			agent.pendingEventBytes = 0;
+			if (agent.droppedEvents) {
+				this.send(socket, `${JSON.stringify({ type: "event", name: "backlog_overflow", text: `${agent.droppedEvents} live events could not be retained before the viewer connected.` })}\n`);
+				agent.droppedEvents = 0;
+			}
 			if (agent.snapshot) this.send(socket, agent.snapshot);
 			else this.send(socket, '{"type":"ready"}\n');
 		});

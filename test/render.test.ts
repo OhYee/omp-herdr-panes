@@ -165,24 +165,23 @@ test("session_init and session_exit render their marker lines", () => {
 	]);
 });
 
-test("malformed and irrelevant entries render nothing", () => {
-	const ignored: unknown[] = [
-		null,
-		"x",
-		{},
-		{ type: "title" },
-		{ type: "message" },
+test("unknown and malformed entries remain visible as JSON", () => {
+	const entries: unknown[] = [
+		null, "x", {}, { type: "title" }, { type: "message" },
 		{ type: "message", message: { role: "assistant", content: "str" } },
 		{ type: "message", message: { role: "user" } },
 		{ type: "message", message: { role: "system", content: [] } },
-		{ type: "session" },
-		{ type: "model_change" },
+		{ type: "session" }, { type: "model_change" },
 		{ type: "custom", customType: "tool_execution_start", data: {} },
-		{ type: "custom" },
-		{ type: "session_init" },
-		[1, 2, 3],
+		{ type: "custom" }, { type: "session_init" }, [1, 2, 3],
 	];
-	for (const entry of ignored) expect(render(entry)).toEqual([]);
+	for (const entry of entries) expect(JSON.parse(render(entry).join("\n"))).toEqual(entry);
+	const mixed = render(assistant({ type: "text", text: "hello" }, { type: "new_type", value: "a  b" }));
+	expect(mixed.join("\n")).toContain('"value": "a  b"');
+	expect(mixed[0]).toBe("hello");
+	expect(render(assistant({ type: "text", text: "hello" }, { type: "toolCall", args: { value: "missing name" } })).join("\n")).toContain("missing name");
+	const result = { type: "message", message: { role: "toolResult", content: [{ type: "future", payload: "full output" }] } };
+	expect(render(result).join("\n")).toContain('"payload": "full output"');
 });
 
 test("control sequences never reach the output, with or without color", () => {

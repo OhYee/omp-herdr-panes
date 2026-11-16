@@ -17,6 +17,11 @@ All notable changes to this project are documented here. The format follows
 - `t` toggles all thinking blocks and sets the default for new thinking.
 - `/herdr-panes` controls pane creation and automatic close delays in the current OMP process.
 - `/herdr-panes` offers argument completion and shows usage alongside the current settings.
+- `T` toggles all tool groups, calls and results, including new ones.
+- Resize the interactive viewer with its pane, including very narrow or short terminals.
+- Show unrecognized transcript records and live events as expandable JSON instead of skipping them.
+- Show the session file being read and provide `p` to copy its full path using OSC 52.
+- Group matching tool execution start records with their call and result without hiding unmatched records.
 - Show the resolved model on a color-coded status line and follow default/fallback model changes.
 
 ### Changed

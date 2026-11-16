@@ -2,8 +2,7 @@
  * Pure renderer for subagent transcript entries.
  *
  * No I/O: it maps one parsed JSONL entry of a subagent transcript to display lines.
- * Entries arrive as `unknown`; every shape is validated with type guards and anything that does
- * not match a known rule renders as `[]`. `renderEntry` never throws.
+ * Unknown entries fall back to their JSON representation. `renderEntry` never throws.
  */
 
 export interface RenderOptions {
@@ -45,19 +44,41 @@ const USER_TEXT_MARKER = "Complete assignment thoroughly:";
 const USER_TEXT_LINE_LIMIT = 6;
 const SUMMARY_KEYS = ["command", "path", "pattern", "query", "url", "task", "code"] as const;
 
-/** Turn one parsed JSONL entry into display lines. Unknown or malformed entries → []. Never throws. */
+/** Turn one parsed JSONL entry into display lines, falling back to JSON. Never throws. */
 export function renderEntry(entry: unknown, options: RenderOptions): string[] {
 	try {
 		const record = recordOf(entry);
-		if (record === null) return [];
-		const type = record["type"];
-		if (type === "session_init") return renderSessionInit(record, options);
-		if (type === "message") return renderMessage(record, options);
-		if (type === "custom") return renderCustom(record, options);
-		return [];
+		const type = record?.["type"];
+		const rendered = record === null ? [] :
+			type === "session_init" ? renderSessionInit(record, options) :
+			type === "message" ? renderMessage(record, options) :
+			type === "custom" ? renderCustom(record, options) : [];
+		const message = recordOf(record?.["message"]);
+		const content = message?.["content"];
+		if (!rendered.length && options.thinkingLines === 0 && message?.["role"] === "assistant" &&
+			Array.isArray(content) && content.length > 0 &&
+			content.every(block => recordOf(block)?.["type"] === "thinking" && typeof recordOf(block)?.["thinking"] === "string")) return [];
+		return rendered.length ? rendered : renderFallback(entry, options);
 	} catch {
 		return [];
 	}
+}
+
+function renderFallback(value: unknown, options: RenderOptions): string[] {
+	const json = JSON.stringify(value, null, 2) ?? String(value);
+	const width = normalizeWidth(options.width);
+	const lines: string[] = [];
+	for (const line of sanitize(json).split("\n")) {
+		let rest = line;
+		while (Bun.stringWidth(rest) > width) {
+			const part = sliceVisible(rest, width);
+			if (!part) break;
+			lines.push(part);
+			rest = rest.slice(part.length);
+		}
+		lines.push(rest);
+	}
+	return lines;
 }
 
 /** Human-readable summary of a tool call's arguments. */
@@ -128,13 +149,14 @@ function renderMessage(record: Record<string, unknown>, options: RenderOptions):
 
 function renderUserMessage(message: Record<string, unknown>, options: RenderOptions): string[] {
 	const content = message["content"];
-	if (!Array.isArray(content)) return [];
-	const lines = nonEmptyLines(joinTextBlocks(content));
+	if (!Array.isArray(content) && typeof content !== "string") return [];
+	const lines = nonEmptyLines(typeof content === "string" ? content : joinTextBlocks(content));
 	if (lines[0] === USER_TEXT_MARKER) lines.shift();
 	const out = [composeLine([{ text: "Task:", style: "bold" }], options, true)];
 	for (const line of lines.slice(0, USER_TEXT_LINE_LIMIT)) {
 		out.push(composeLine([{ text: `  ${line}`, style: null }], options, true));
 	}
+	if (Array.isArray(content)) out.push(...renderUnknownBlocks(content, options));
 	return out;
 }
 
@@ -144,11 +166,12 @@ function renderAssistantMessage(message: Record<string, unknown>, options: Rende
 	const out: string[] = [];
 	for (const block of content) {
 		const record = recordOf(block);
-		if (record === null) continue;
+		if (record === null) { out.push(...renderFallback(block, options)); continue; }
 		const blockType = record["type"];
-		if (blockType === "thinking") out.push(...renderThinkingBlock(record, options));
-		else if (blockType === "text") out.push(...renderTextBlock(record, options));
-		else if (blockType === "toolCall") out.push(...renderToolCallBlock(record, options));
+		if (blockType === "thinking" && typeof record["thinking"] === "string") out.push(...renderThinkingBlock(record, options));
+		else if (blockType === "text" && typeof record["text"] === "string") out.push(...renderTextBlock(record, options));
+		else if (blockType === "toolCall" && typeof record["name"] === "string") out.push(...renderToolCallBlock(record, options));
+		else out.push(...renderFallback(block, options));
 	}
 	const stopReason = message["stopReason"];
 	if (stopReason === "error") {
@@ -217,7 +240,8 @@ function yieldSummary(args: unknown): string {
 function renderToolResultMessage(message: Record<string, unknown>, options: RenderOptions): string[] {
 	const isError = message["isError"] === true;
 	const content = message["content"];
-	const lines = nonEmptyLines(Array.isArray(content) ? joinTextBlocks(content) : "");
+	if (!Array.isArray(content) && typeof content !== "string") return [];
+	const lines = nonEmptyLines(typeof content === "string" ? content : joinTextBlocks(content));
 	const segments: Segment[] = [
 		{ text: "  ", style: null },
 		{ text: isError ? "✗" : "✓", style: isError ? "red" : "green" },
@@ -232,7 +256,7 @@ function renderToolResultMessage(message: Record<string, unknown>, options: Rend
 		const extra = lines.length - 1;
 		if (extra > 0) segments.push({ text: ` (+${extra} lines)`, style: null });
 	}
-	return [composeLine(segments, options, true)];
+	return [composeLine(segments, options, true), ...(Array.isArray(content) ? renderUnknownBlocks(content, options) : [])];
 }
 
 function renderCustom(record: Record<string, unknown>, options: RenderOptions): string[] {
@@ -297,11 +321,18 @@ function joinTextBlocks(content: unknown[]): string {
 	const parts: string[] = [];
 	for (const block of content) {
 		const record = recordOf(block);
-		if (record === null || record["type"] !== "text") continue;
-		const text = stringProp(record, "text");
-		if (text !== null) parts.push(text);
+		if (record?.["type"] === "text" && typeof record["text"] === "string") parts.push(record["text"]);
 	}
 	return parts.join("\n");
+}
+
+function renderUnknownBlocks(content: unknown[], options: RenderOptions): string[] {
+	const lines: string[] = [];
+	for (const block of content) {
+		const record = recordOf(block);
+		if (record?.["type"] !== "text" || typeof record["text"] !== "string") lines.push(...renderFallback(block, options));
+	}
+	return lines;
 }
 
 function nonEmptyLines(text: string): string[] {

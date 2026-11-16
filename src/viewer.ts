@@ -351,6 +351,7 @@ function connectLive(path: string, token: string, model: TranscriptModel, tui: V
 					const frame = recordOf(JSON.parse(line));
 					if (frame?.["type"] === "live" && Array.isArray(frame["content"])) model.setLive(frame["content"]);
 					else if (frame?.["type"] === "clear") model.clearLive();
+					else if (frame?.["type"] === "event" && typeof frame["name"] === "string" && typeof frame["text"] === "string") model.appendLiveEvent(frame["name"], frame["text"]);
 					else if (frame?.["type"] === "state" && typeof frame["status"] === "string") model.status = frame["status"];
 					else if (frame?.["type"] === "stream_error") model.streamStatus = "unavailable";
 					if (frame?.["type"] !== "stream_error") model.streamStatus = "live";
@@ -390,11 +391,11 @@ async function main(): Promise<void> {
 	const model = interactive ? new TranscriptModel() : undefined;
 	if (model && options.streamUnavailable) model.streamStatus = "unavailable";
 	if (model && !options.socketPath && !options.streamUnavailable) model.status = "history";
-	const tui = model ? new ViewerTui(model, options.title, () => process.exit(0)) : undefined;
+	const tui = model ? new ViewerTui(model, options.title, options.sessionFile, () => process.exit(0)) : undefined;
 	installProcessHandlers(tui);
 	if (options.parentPid !== null) watchParent(options.parentPid);
 	if (tui) tui.start();
-	else process.stdout.write(`${CLEAR_SCREEN}${BOLD}${sanitize(options.title).replace(/\n/gu, " ")}${RESET}\n\n`);
+	else process.stdout.write(`${CLEAR_SCREEN}${BOLD}${sanitize(options.title).replace(/\n/gu, " ")}${RESET}\nFile: ${sanitize(options.sessionFile).replace(/\r?\n/gu, " ")}\n\n`);
 	await waitForTranscript(options.sessionFile);
 	await startTailLoop(options, model, tui);
 	if (model && tui && options.socketPath && options.token) connectLive(options.socketPath, options.token, model, tui);
