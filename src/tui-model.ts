@@ -142,9 +142,17 @@ export class TranscriptModel {
 		if (!record) return false;
 		if (record["type"] === "session_init") {
 			this.agent = typeof record["agent"] === "string" ? record["agent"] : "";
-			this.model = typeof record["resolvedModel"] === "string" ? record["resolvedModel"] : "";
+			if (typeof record["resolvedModel"] === "string" && record["resolvedModel"]) this.model = record["resolvedModel"];
 			this.status = "running";
 			return true;
+		}
+		if (record["type"] === "model_change") {
+			const role = record["role"];
+			if ((role === undefined || role === "default" || role === "fallback") && typeof record["model"] === "string" && record["model"]) {
+				this.model = record["model"];
+				return true;
+			}
+			return false;
 		}
 		if (record["type"] === "custom" && record["customType"] === "session_exit") {
 			if (this.status === "waiting" || this.status === "running") this.status = "ended";
@@ -155,6 +163,12 @@ export class TranscriptModel {
 		const message = recordOf(record["message"]);
 		if (!message) return false;
 		const role = message["role"];
+		let modelChanged = false;
+		if (!this.model && role === "assistant" && typeof message["model"] === "string" && message["model"]) {
+			const provider = typeof message["provider"] === "string" ? message["provider"] : "";
+			this.model = provider && !message["model"].startsWith(`${provider}/`) ? `${provider}/${message["model"]}` : message["model"];
+			modelChanged = true;
+		}
 		const id = typeof record["id"] === "string" ? record["id"] : `entry-${this.sequence++}`;
 		const added: Card[] = [];
 		if (role === "user") {
@@ -198,7 +212,7 @@ export class TranscriptModel {
 		if (role === "user" && this.status === "ended") this.status = "running";
 		for (const card of added) appendCard(this.cards, card);
 		if (this.follow && added.length > 0) this.selected = Math.max(0, this.all.length - 1);
-		return added.length > 0;
+		return added.length > 0 || modelChanged;
 	}
 
 	setLive(content: unknown[]): void {

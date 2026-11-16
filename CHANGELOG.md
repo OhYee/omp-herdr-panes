@@ -15,6 +15,8 @@ All notable changes to this project are documented here. The format follows
 - Open a saved session by ID, ID prefix or JSONL path.
 - `OMP_HERDR_PANES_AUTO_CLOSE=0` keeps finished panes open until manually closed or omp exits.
 - `t` toggles all thinking blocks and sets the default for new thinking.
+- `/herdr-panes` controls pane creation and automatic close delays in the current OMP process.
+- Show the resolved model on a color-coded status line and follow default/fallback model changes.
 
 ### Changed
 

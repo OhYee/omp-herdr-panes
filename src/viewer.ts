@@ -249,6 +249,8 @@ async function startTailLoop(options: ViewerOptions, model?: TranscriptModel, tu
 			if (state.model) {
 				state.model.cards = [];
 				state.model.selected = 0;
+				state.model.model = "";
+				state.model.agent = "";
 				state.totals = { tokens: 0, cost: 0, durationMs: null };
 				state.startMs = null;
 			}

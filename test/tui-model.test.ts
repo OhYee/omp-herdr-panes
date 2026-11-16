@@ -4,6 +4,31 @@ import { cardSummary, TranscriptModel } from "../src/tui-model.ts";
 const message = (role: string, content: unknown, extra: Record<string, unknown> = {}) =>
 	({ type: "message", message: { role, content, ...extra } });
 
+test("shows the resolved model and follows default-model changes, ignoring other roles", () => {
+	const model = new TranscriptModel();
+	model.append({ type: "model_change", model: "old/default" });
+	model.append({ type: "session_init", agent: "scout", resolvedModel: "provider/model:high" });
+	expect(model.model).toBe("provider/model:high");
+	model.append({ type: "model_change", role: "smol", model: "other/auxiliary" });
+	expect(model.model).toBe("provider/model:high");
+	model.append({ type: "model_change", role: "default", model: "provider/new-model" });
+	expect(model.model).toBe("provider/new-model");
+	model.append({ type: "model_change", role: "fallback", model: "provider/promoted-model" });
+	expect(model.model).toBe("provider/promoted-model");
+	model.append({ type: "model_change", role: "default", model: "provider/new-model" });
+	model.append({ type: "model_change", model: "" });
+	model.append({ type: "session_init", agent: "scout" });
+	expect(model.model).toBe("provider/new-model");
+});
+
+test("uses assistant message metadata only when the session has no model metadata", () => {
+	const model = new TranscriptModel();
+	expect(model.append(message("assistant", [], { provider: "provider", model: "actual-model" }))).toBe(true);
+	expect(model.model).toBe("provider/actual-model");
+	model.append(message("assistant", [], { provider: "other", model: "different-model" }));
+	expect(model.model).toBe("provider/actual-model");
+});
+
 test("shows input, thinking, tool arguments, tool result and output with full content available", () => {
 	const model = new TranscriptModel();
 	model.append(message("user", [{ type: "text", text: "检查代码\n  约束：不改 API" }]));

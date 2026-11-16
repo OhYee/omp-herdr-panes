@@ -11,7 +11,8 @@ itself by default a few seconds after its subagent finishes, and your omp pane g
 ## What you get
 
 - **One pane per subagent**, stacked in a single column to the right of omp and titled
-  `<name> · <agent>`.
+  `<name> · <agent>`. The status line color-codes state, stream, name and model; long names are
+  abbreviated in narrow panes.
 - **Interactive transcript**: inspect full input, thinking, tool calls, tool results, errors and
   output. Expand or collapse each item and scroll without sending input to the subagent.
   Thinking, tool calls, tool results and errors start collapsed.

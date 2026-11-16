@@ -16,6 +16,40 @@ function clip(value: string, width: number): string {
 	return text;
 }
 
+function ellipsize(value: string, width: number): string {
+	if (width <= 0) return "";
+	if (Bun.stringWidth(value) <= width) return value;
+	return `${clip(value, width - 1)}…`;
+}
+
+function ellipsizeModel(value: string, width: number): string {
+	if (Bun.stringWidth(value) <= width) return value;
+	const colon = value.lastIndexOf(":");
+	const suffix = colon > value.lastIndexOf("/") ? value.slice(colon) : "";
+	if (!suffix || Bun.stringWidth(suffix) + 1 >= width) return ellipsize(value, width);
+	return `${clip(value, width - Bun.stringWidth(suffix) - 1)}…${suffix}`;
+}
+
+function header(status: string, stream: string, label: string, model: string, follow: boolean, width: number): string {
+	const statusColor = status === "failed" || status === "aborted" || status === "error" ? "31"
+		: status === "running" || status === "completed" ? "32" : "33";
+	const streamColor = stream === "unavailable" ? "31" : stream === "connecting" ? "33" : "36";
+	const color = (text: string, code: string) => `\x1b[1;${code}m${text}\x1b[0m`;
+	const prefix = `${status} · ${stream}`;
+	const full = `${prefix} · ${label} · ${model}`;
+	const render = (shownLabel: string, shownModel: string, showFollow = false) =>
+		`${color(status, statusColor)} · ${color(stream, streamColor)} · ${color(shownLabel, "35")} · ${color(shownModel, "33")}${showFollow ? ` · ${color("follow", "36")}` : ""}`;
+	if (follow && Bun.stringWidth(`${full} · follow`) <= width) return render(label, model, true);
+	if (Bun.stringWidth(full) <= width) return render(label, model);
+	const remaining = width - Bun.stringWidth(prefix) - 6;
+	if (remaining < 2) return color(ellipsize(`${prefix} · ${model}`, width), statusColor);
+	const minLabel = Math.min(Bun.stringWidth(label), 4, remaining - 1);
+	const slash = model.indexOf("/");
+	const shortModel = Bun.stringWidth(model) > remaining - minLabel && slash >= 0 ? `…/${model.slice(slash + 1)}` : model;
+	const labelWidth = Math.min(Bun.stringWidth(label), Math.max(minLabel, remaining - Bun.stringWidth(shortModel)));
+	return render(ellipsize(label, labelWidth), ellipsizeModel(shortModel, remaining - labelWidth));
+}
+
 interface WrappedLine { text: string; code: boolean }
 
 function wrap(value: string, width: number, codeByDefault = false): WrappedLine[] {
@@ -113,6 +147,12 @@ export class ViewerTui {
 		this.renderTimer = setTimeout(() => { this.renderTimer = undefined; this.render(); }, 80);
 	}
 
+	private dimensions(): { width: number; height: number; available: number } {
+		const width = Math.max(1, process.stdout.columns || 80);
+		const height = Math.max(3, process.stdout.rows || 24);
+		return { width, height, available: Math.max(1, height - 3) };
+	}
+
 	private rows(width: number): Row[] {
 		const rows: Row[] = [];
 		let inTools = false;
@@ -154,8 +194,9 @@ export class ViewerTui {
 			this.requestRender();
 			return;
 		}
-		if ((button & 3) !== 0 || row < 2 || row >= (process.stdout.rows || 24)) return;
-		const visible = this.rows(Math.max(1, process.stdout.columns || 80))[this.top + row - 2];
+		const { width, height } = this.dimensions();
+		if ((button & 3) !== 0 || row < 2 || row >= height) return;
+		const visible = this.rows(width)[this.top + row - 2];
 		if (!visible) return;
 		this.model.follow = false;
 		this.model.selected = visible.card;
@@ -188,7 +229,7 @@ export class ViewerTui {
 
 	private input(data: string): void {
 		if (data === "\u0003") { this.stop(); this.quit(); return; }
-		const rows = Math.max(1, (process.stdout.rows || 24) - 3);
+		const rows = this.dimensions().available;
 		if (data === "g") {
 			if (!this.awaitingG) { this.awaitingG = true; return; }
 			this.awaitingG = false;
@@ -220,9 +261,7 @@ export class ViewerTui {
 
 	private render(): void {
 		if (this.stopped) return;
-		const width = Math.max(1, process.stdout.columns || 80);
-		const height = Math.max(3, process.stdout.rows || 24);
-		const available = Math.max(1, height - 3);
+		const { width, height, available } = this.dimensions();
 		const rows = this.rows(width);
 		const maxTop = Math.max(0, rows.length - available);
 		if (this.model.follow) this.top = maxTop;
@@ -235,9 +274,9 @@ export class ViewerTui {
 		this.top = Math.max(0, Math.min(this.top, maxTop));
 		const label = cardSummary(this.title) || "Subagent";
 		const stream = this.model.streamStatus ?? "file";
-		const status = `${this.model.status} · ${stream} · ${label}${this.model.follow ? " · follow" : ""}`;
+		const status = header(cardSummary(this.model.status), stream, label, cardSummary(this.model.model) || "unknown", this.model.follow, width);
 		const hint = "Ctrl+C exit  t THINK  j/k select  h/l fold  ^U/^D scroll  gg/G";
-		const screen: string[] = [`\x1b[1m${clip(status, width)}\x1b[0m`];
+		const screen: string[] = [status];
 		if (rows.length === 0) screen.push(clip("Waiting for transcript…", width));
 		for (const row of rows.slice(this.top, this.top + available)) {
 			const selected = row.header && row.card === this.model.selected;
