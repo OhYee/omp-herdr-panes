@@ -50,15 +50,6 @@ export default function ompHerdrPanes(pi: ExtensionAPI): void {
 	ownerClaimed = true;
 	settings ??= { enabled: process.env.OMP_HERDR_PANES !== "0", autoClose: config.autoClose, closeDelayMs: config.closeDelayMs, failCloseDelayMs: config.failCloseDelayMs };
 
-	if (!bridge) {
-		try {
-			bridge = new LiveBridge((message, context) => pi.logger.warn(`herdr-panes: ${message}`, context));
-			liveEvents = new LiveEvents(bridge);
-		} catch (error) {
-			pi.logger.warn("herdr-panes: live streaming unavailable", { error: String(error) });
-		}
-	}
-
 	manager ??= new PaneManager(
 		createHerdrCli(),
 		{
@@ -86,6 +77,15 @@ export default function ompHerdrPanes(pi: ExtensionAPI): void {
 				if (event === null) return;
 				if (event.status === "started") {
 					if (!settings?.enabled && !manager?.has(event.sessionFile)) return;
+					// Validators may initialize the extension without sending session_shutdown.
+					if (!bridge) {
+						try {
+							bridge = new LiveBridge((message, context) => pi.logger.warn(`herdr-panes: ${message}`, context));
+							liveEvents = new LiveEvents(bridge);
+						} catch (error) {
+							pi.logger.warn("herdr-panes: live streaming unavailable", { error: String(error) });
+						}
+					}
 					if (bridge) {
 						try {
 							const token = bridge.register(event.id);

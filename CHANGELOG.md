@@ -28,6 +28,10 @@ All notable changes to this project are documented here. The format follows
 - Start thinking collapsed and render without ANSI dim styling.
 - Move the selected item along with Ctrl+U/Ctrl+D half-page scrolling.
 
+### Fixed
+
+- Start the live-event socket only when a subagent starts, so plugin installation validation can exit.
+
 ## [0.2.0] - 2026-10-04
 
 ### Added
