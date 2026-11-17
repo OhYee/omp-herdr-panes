@@ -81,6 +81,7 @@ export class TranscriptModel {
 	private toolsExpanded = false;
 	private lastLiveExpansion = new Map<string, boolean>();
 	private readonly toolGroups = new Map<string, Card>();
+	private readonly executionUpdates = new Map<string, Card>();
 	private boundaryThinking?: { savedId: string; liveId: string; card: Card };
 	private lastLiveGroups = new Map<string, boolean>();
 
@@ -261,16 +262,23 @@ export class TranscriptModel {
 		return true;
 	}
 
-	appendLiveEvent(type: string, text: string): void {
-		let toolCallId: string | undefined;
-		if (type === "tool_execution_start") {
+	appendLiveEvent(type: string, text: string, toolCallId?: string): void {
+		const execution = type === "tool_execution_start" || type === "tool_execution_update";
+		if (type === "tool_execution_start" && !toolCallId) {
 			try {
 				const event = recordOf(JSON.parse(text));
 				if (typeof event?.["toolCallId"] === "string" && event["toolCallId"]) toolCallId = event["toolCallId"];
 			} catch { /* Truncated or malformed events remain separately visible. */ }
 		}
-		this.cards.push({ id: `event-${this.sequence++}`, kind: type === "tool_execution_start" ? "execution" : "status",
-			title: `EVENT ${type}`, body: text, expanded: type === "tool_execution_start" && this.toolsExpanded, live: true, toolCallId });
+		const previous = type === "tool_execution_update" && toolCallId ? this.executionUpdates.get(toolCallId) : undefined;
+		if (previous) {
+			previous.body = text;
+			return;
+		}
+		const card: Card = { id: `event-${this.sequence++}`, kind: execution ? "execution" : "status",
+			title: `EVENT ${type}`, body: text, expanded: execution && this.toolsExpanded, live: true, toolCallId };
+		this.cards.push(card);
+		if (type === "tool_execution_update" && toolCallId) this.executionUpdates.set(toolCallId, card);
 		if (this.follow) this.selected = Math.max(0, this.all.length - 1);
 	}
 

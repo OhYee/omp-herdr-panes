@@ -23,6 +23,7 @@ All notable changes to this project are documented here. The format follows
 - Show the session file being read and provide `p` to copy its full path using OSC 52.
 - Group matching tool execution start records with their call and result without hiding unmatched records.
 - Display incoming IRC as input, async completions as tool results, and advisor feedback separately.
+- Group live tool execution updates with their calls, keeping the latest progress for each call.
 - Show the resolved model on a color-coded status line and follow default/fallback model changes.
 
 ### Changed

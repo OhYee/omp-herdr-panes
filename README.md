@@ -22,8 +22,8 @@ itself by default a few seconds after its subagent finishes, and your omp pane g
   Consecutive thinking blocks are merged. Consecutive tool calls form a collapsed `TOOLS: N`
   group. A call and its matching result share one expandable item, matched by tool call ID;
   results without an unambiguous match remain separate.
-  Matching `tool_execution_start` records and live events appear inside the same call; unmatched
-  or ambiguous records remain separate.
+  Matching `tool_execution_start` records and live events appear inside the same call; the latest
+  `tool_execution_update` is shown there as live progress. Unmatched or ambiguous events remain separate.
 - **Live updates**: assistant text, thinking and tool-call snapshots stream from omp events;
   completed messages and tool results are read from the session transcript.
 - **Agent messages**: incoming IRC appears as `INPUT · IRC`, background completions as tool

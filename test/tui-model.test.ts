@@ -234,6 +234,38 @@ test("leaves starts with missing or ambiguous call IDs visible as separate cards
 	expect(model.all[5]?.body).toBe('{"toolCallId":');
 });
 
+test("keeps the latest execution update with its matching call and final result", () => {
+	const model = new TranscriptModel();
+	model.appendLiveEvent("tool_execution_update", "first", "b");
+	model.appendLiveEvent("tool_execution_update", "progress A", "a");
+	model.appendLiveEvent("tool_execution_update", "latest B", "b");
+	model.append(message("assistant", [
+		{ type: "toolCall", id: "a", name: "read", arguments: {} },
+		{ type: "toolCall", id: "b", name: "bash", arguments: {} },
+	]));
+	model.append(message("toolResult", "finished B", { toolCallId: "b", toolName: "bash" }));
+	model.toggleTools();
+	expect(model.all.map(card => card.kind)).toEqual(["tools", "tool", "tool"]);
+	expect(model.all[1]?.execution?.[0]?.body).toBe("progress A");
+	expect(model.all[2]?.execution?.map(card => card.body)).toEqual(["latest B"]);
+	expect(model.all[2]?.result?.body).toBe("finished B");
+});
+
+test("leaves updates without a unique matching call visible", () => {
+	const model = new TranscriptModel();
+	model.append(message("assistant", [
+		{ type: "toolCall", id: "duplicate", name: "read", arguments: {} },
+		{ type: "toolCall", id: "duplicate", name: "read", arguments: {} },
+	]));
+	model.appendLiveEvent("tool_execution_update", '{"toolCallId":"duplicate"}');
+	model.appendLiveEvent("tool_execution_update", "ambiguous", "duplicate");
+	model.appendLiveEvent("tool_execution_update", "missing call", "missing");
+	model.toggleTools();
+	expect(model.all.map(card => card.kind)).toEqual(["tools", "tool", "tool", "execution", "execution", "execution"]);
+	expect(model.all[1]?.execution).toBeUndefined();
+	expect(model.all.slice(3).map(card => card.body)).toEqual(['{"toolCallId":"duplicate"}', "ambiguous", "missing call"]);
+});
+
 test("toggle-all still collapses a paired call after expanding it", () => {
 	const model = new TranscriptModel();
 	model.append(message("assistant", [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }]));

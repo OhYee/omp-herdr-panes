@@ -41,7 +41,11 @@ export class LiveEvents {
 		if (event["type"] !== "message_update" || message?.["role"] !== "assistant") {
 			if ((event["type"] === "message_start" || event["type"] === "message_end") &&
 				(message?.["role"] === "user" || message?.["role"] === "toolResult")) return;
-			this.sink.publish(id, { type: "event", name: typeof event["type"] === "string" ? event["type"] : "unknown", text: preview(event) });
+			const type = event["type"];
+			const execution = type === "tool_execution_start" || type === "tool_execution_update";
+			const toolCallId = execution && typeof event["toolCallId"] === "string" && event["toolCallId"] ? event["toolCallId"] : undefined;
+			const content = type === "tool_execution_update" && "partialResult" in event ? event["partialResult"] : event;
+			this.sink.publish(id, { type: "event", name: typeof type === "string" ? type : "unknown", text: preview(content), ...(toolCallId ? { toolCallId } : {}) });
 			return;
 		}
 		const delta = recordOf(event["assistantMessageEvent"]);

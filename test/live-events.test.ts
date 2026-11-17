@@ -73,3 +73,16 @@ test("forwards unknown live events and unknown assistant blocks with bounded pre
 	expect(frames.at(-1)?.text).toContain("[Live event truncated.]");
 	live.close();
 });
+
+test("preserves the call ID and progress when execution update arguments are large", () => {
+	const frames: Array<{ name?: string; text?: string; toolCallId?: string }> = [];
+	const live = new LiveEvents({ publish: (_id, frame) => frames.push(frame as typeof frames[number]) });
+	live.handle({ id: "agent", event: {
+		type: "tool_execution_update", toolCallId: "call-1", toolName: "bash",
+		args: { input: "x".repeat(100_000) }, partialResult: { content: [{ type: "text", text: "working" }] },
+	} });
+	expect(frames[0]?.toolCallId).toBe("call-1");
+	expect(frames[0]?.text).toContain("working");
+	expect(frames[0]?.text).not.toContain("[Live event truncated.]");
+	live.close();
+});

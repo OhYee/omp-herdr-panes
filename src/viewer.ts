@@ -351,7 +351,7 @@ function connectLive(path: string, token: string, model: TranscriptModel, tui: V
 					const frame = recordOf(JSON.parse(line));
 					if (frame?.["type"] === "live" && Array.isArray(frame["content"])) model.setLive(frame["content"]);
 					else if (frame?.["type"] === "clear") model.clearLive();
-					else if (frame?.["type"] === "event" && typeof frame["name"] === "string" && typeof frame["text"] === "string") model.appendLiveEvent(frame["name"], frame["text"]);
+					else if (frame?.["type"] === "event" && typeof frame["name"] === "string" && typeof frame["text"] === "string") model.appendLiveEvent(frame["name"], frame["text"], typeof frame["toolCallId"] === "string" ? frame["toolCallId"] : undefined);
 					else if (frame?.["type"] === "state" && typeof frame["status"] === "string") model.status = frame["status"];
 					else if (frame?.["type"] === "stream_error") model.streamStatus = "unavailable";
 					if (frame?.["type"] !== "stream_error") model.streamStatus = "live";
