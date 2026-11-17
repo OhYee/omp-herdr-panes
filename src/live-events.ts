@@ -40,11 +40,31 @@ export class LiveEvents {
 		}
 		if (event["type"] !== "message_update" || message?.["role"] !== "assistant") {
 			if ((event["type"] === "message_start" || event["type"] === "message_end") &&
-				(message?.["role"] === "user" || message?.["role"] === "toolResult")) return;
+				(message?.["role"] === "user" || message?.["role"] === "toolResult" ||
+					(message?.["role"] === "custom" && message["customType"] === "irc:incoming"))) return;
 			const type = event["type"];
-			const execution = type === "tool_execution_start" || type === "tool_execution_update";
+			const execution = type === "tool_execution_start" || type === "tool_execution_update" ||
+				type === "tool_stream_update" || type === "tool_execution_end" ||
+				type === "tool_approval_requested" || type === "tool_approval_resolved";
 			const toolCallId = execution && typeof event["toolCallId"] === "string" && event["toolCallId"] ? event["toolCallId"] : undefined;
-			const content = type === "tool_execution_update" && "partialResult" in event ? event["partialResult"] : event;
+			let content: unknown = type === "tool_execution_update" && "partialResult" in event ? event["partialResult"]
+				: type === "tool_stream_update" && "update" in event ? event["update"] : event;
+			if (type === "tool_execution_end") {
+				const result = preview(event["result"]);
+				content = { type, toolCallId, toolName: event["toolName"], isError: event["isError"],
+					result: result.length > 8000 ? `${result.slice(0, 8000)}\n[Live event truncated.]` : event["result"] };
+			}
+			if (type === "plan_review_requested" && typeof event["planContent"] === "string" && event["planContent"].length > 8000) {
+				content = { ...event, planContent: `${event["planContent"].slice(0, 8000)}\n[Live event truncated.]` };
+			}
+			if (type === "irc_message" && message) {
+				const details = recordOf(message["details"]);
+				const value = message["content"];
+				const full = typeof value === "string" ? value : JSON.stringify(value);
+				content = { type, message: { customType: message["customType"], display: message["display"],
+					content: full && full.length > 8000 ? `${full.slice(0, 8000)}\n[Live event truncated.]` : value,
+					details: { id: details?.["id"] } } };
+			}
 			this.sink.publish(id, { type: "event", name: typeof type === "string" ? type : "unknown", text: preview(content), ...(toolCallId ? { toolCallId } : {}) });
 			return;
 		}

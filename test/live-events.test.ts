@@ -86,3 +86,22 @@ test("preserves the call ID and progress when execution update arguments are lar
 	expect(frames[0]?.text).not.toContain("[Live event truncated.]");
 	live.close();
 });
+
+test("forwards association IDs and bounded IRC, tool results and plan reviews", () => {
+	const frames: Array<{ name: string; text: string; toolCallId?: string }> = [];
+	const live = new LiveEvents({ publish: (_id, frame) => frames.push(frame as typeof frames[number]) });
+	for (const type of ["tool_execution_end", "tool_approval_requested", "tool_approval_resolved", "tool_stream_update"]) {
+		live.handle({ id: "agent", event: { type, toolCallId: "call", result: { content: "x".repeat(100_000) }, update: { preview: "diff" } } });
+	}
+	live.handle({ id: "agent", event: { type: "irc_message", message: {
+		customType: "irc:incoming", display: true, content: "x".repeat(100_000), details: { id: "irc-id" },
+	} } });
+	live.handle({ id: "agent", event: { type: "plan_review_requested", reviewId: "review", planContent: "x".repeat(100_000) } });
+	expect(frames.slice(0, 4).map(frame => frame.toolCallId)).toEqual(["call", "call", "call", "call"]);
+	expect(JSON.parse(frames[0]!.text).result).toContain("[Live event truncated.]");
+	expect(JSON.parse(frames[3]!.text).preview).toBe("diff");
+	expect(JSON.parse(frames[4]!.text).message.details.id).toBe("irc-id");
+	expect(JSON.parse(frames[4]!.text).message.content).toContain("[Live event truncated.]");
+	expect(JSON.parse(frames[5]!.text).reviewId).toBe("review");
+	live.close();
+});

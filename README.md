@@ -22,12 +22,13 @@ itself by default a few seconds after its subagent finishes, and your omp pane g
   Consecutive thinking blocks are merged. Consecutive tool calls form a collapsed `TOOLS: N`
   group. A call and its matching result share one expandable item, matched by tool call ID;
   results without an unambiguous match remain separate.
-  Matching `tool_execution_start` records and live events appear inside the same call; the latest
-  `tool_execution_update` is shown there as live progress. Unmatched or ambiguous events remain separate.
+  Matching execution, stream-preview and approval events appear inside the same call; the latest
+  progress and stream preview are retained. Unmatched or ambiguous events remain separate.
 - **Live updates**: assistant text, thinking and tool-call snapshots stream from omp events;
   completed messages and tool results are read from the session transcript.
-- **Agent messages**: incoming IRC appears as `INPUT · IRC`, background completions as tool
-  results, and advisor feedback as `ADVISOR`; other custom messages retain their JSON fallback.
+- **Agent messages**: incoming IRC appears as `INPUT · IRC`, with live and saved copies matched by
+  message ID. Background completions appear as tool results, and advisor feedback as `ADVISOR`;
+  other custom messages retain their JSON fallback. Plan review requests and resolutions share a card.
 - **Nested subagents too**: a subagent that spawns its own subagents gets panes for them as well
   (e.g. `Outer · task` and `Outer.Inner · sonic`).
 - **Outcome at a glance**: when a subagent ends, its pane title gets a `✓` (completed) or `✗`

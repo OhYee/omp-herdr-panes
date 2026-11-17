@@ -24,6 +24,8 @@ All notable changes to this project are documented here. The format follows
 - Group matching tool execution start records with their call and result without hiding unmatched records.
 - Display incoming IRC as input, async completions as tool results, and advisor feedback separately.
 - Group live tool execution updates with their calls, keeping the latest progress for each call.
+- Group tool completion, stream preview and approval events with matching calls, deduplicate live IRC
+  inputs against saved messages, and combine plan review requests with their resolutions.
 - Show the resolved model on a color-coded status line and follow default/fallback model changes.
 
 ### Changed

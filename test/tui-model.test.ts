@@ -464,3 +464,56 @@ test("valid async results without failures remain distinct and invalid messages 
 test("labels remove terminal control sequences while preserving Chinese text", () => {
 	expect(cardSummary("\x1b]0;malicious\x07中文\x1b[31m标题\x1b[0m\nnext")).toBe("中文标题 next");
 });
+
+test("groups tool completion, approvals and latest stream projection without duplicating results", () => {
+	const model = new TranscriptModel();
+	model.append(message("assistant", [{ type: "toolCall", id: "call", name: "bash", arguments: {} }]));
+	for (const type of ["tool_approval_requested", "tool_approval_resolved"]) {
+		model.appendLiveEvent(type, JSON.stringify({ type, toolCallId: "call" }));
+	}
+	model.appendLiveEvent("tool_stream_update", "old projection", "call");
+	model.appendLiveEvent("tool_stream_update", "new projection", "call");
+	const end = JSON.stringify({ type: "tool_execution_end", toolCallId: "call", isError: true, result: { content: [{ type: "text", text: "failed output" }] } });
+	model.appendLiveEvent("tool_execution_end", end, "call");
+	expect(model.all[0]?.execution?.at(-1)?.body).toContain("failed output");
+	model.append(message("toolResult", "failed output", { toolCallId: "call", toolName: "bash", isError: true }));
+	const call = model.all[0]!;
+	expect(call.result).toMatchObject({ body: "failed output", error: true });
+	expect(call.execution?.map(card => card.title)).toEqual([
+		"EVENT tool_approval_requested", "EVENT tool_approval_resolved", "EVENT tool_stream_update", "EVENT tool_execution_end",
+	]);
+	expect(call.execution?.[2]?.body).toBe("new projection");
+	expect(call.execution?.[3]?.body).not.toContain("failed output");
+	expect(call.execution?.[3]?.body).toContain('"isError": true');
+	model.appendLiveEvent("tool_execution_end", JSON.stringify({ type: "tool_execution_end", toolCallId: "missing", result: "unmatched" }), "missing");
+	expect(model.all.at(-1)?.body).toContain("unmatched");
+});
+
+test("deduplicates live IRC by message ID in either arrival order and respects hidden parent steers", () => {
+	const event = (id: string, content: string, display = true) => JSON.stringify({
+		type: "irc_message", message: { customType: "irc:incoming", content, display, details: { id } },
+	});
+	const model = new TranscriptModel();
+	model.appendLiveEvent("irc_message", event("one", "live"));
+	expect(model.all[0]).toMatchObject({ kind: "input", title: "INPUT · IRC", body: "live", live: true });
+	model.append({ type: "custom_message", customType: "irc:incoming", content: "durable", details: { id: "one" } });
+	expect(model.all).toHaveLength(1);
+	expect(model.all[0]).toMatchObject({ body: "durable", kind: "input" });
+	expect(model.all[0]?.live).toBeUndefined();
+	model.append({ type: "custom_message", customType: "irc:incoming", content: "persisted first", details: { id: "two" } });
+	model.appendLiveEvent("irc_message", event("two", "later live"));
+	model.appendLiveEvent("irc_message", event("three", "hidden", false));
+	model.append(message("user", "parent steer"));
+	expect(model.all.map(card => card.body)).toEqual(["durable", "persisted first", "parent steer"]);
+});
+
+test("groups plan review states by review ID and preserves unrelated lifecycle events", () => {
+	const model = new TranscriptModel();
+	model.appendLiveEvent("plan_review_requested", JSON.stringify({ type: "plan_review_requested", reviewId: "r1", title: "Plan" }));
+	model.appendLiveEvent("plan_review_requested", JSON.stringify({ type: "plan_review_requested", reviewId: "r2", title: "Another" }));
+	model.appendLiveEvent("plan_review_resolved", JSON.stringify({ type: "plan_review_resolved", reviewId: "r1", choice: "execute" }));
+	model.appendLiveEvent("agent_start", '{"type":"agent_start"}');
+	expect(model.all.map(card => card.title)).toEqual(["PLAN REVIEW · resolved", "PLAN REVIEW · requested", "EVENT agent_start"]);
+	expect(model.all[0]?.body).toContain('"choice":"execute"');
+	expect(model.all[1]?.body).not.toContain('"choice"');
+});

@@ -82,6 +82,8 @@ export class TranscriptModel {
 	private lastLiveExpansion = new Map<string, boolean>();
 	private readonly toolGroups = new Map<string, Card>();
 	private readonly executionUpdates = new Map<string, Card>();
+	private readonly ircMessages = new Map<string, Card>();
+	private readonly planReviews = new Map<string, Card>();
 	private boundaryThinking?: { savedId: string; liveId: string; card: Card };
 	private lastLiveGroups = new Map<string, boolean>();
 
@@ -117,7 +119,17 @@ export class TranscriptModel {
 			if (card.kind !== "execution" || !card.toolCallId) continue;
 			const call = calls.get(card.toolCallId);
 			if (!call) continue;
-			(call.execution ??= []).push(card);
+			let execution = card;
+			if (card.title === "EVENT tool_execution_end" && call.result) {
+				try {
+					const event = recordOf(JSON.parse(card.body));
+					if (event) {
+						const { result: _result, ...metadata } = event;
+						execution = { ...card, body: pretty(metadata) };
+					}
+				} catch { /* Keep an unparseable preview visible. */ }
+			}
+			(call.execution ??= []).push(execution);
 			paired.add(card);
 		}
 		let length = 0;
@@ -186,11 +198,18 @@ export class TranscriptModel {
 			const customType = record["customType"];
 			if (customType === "irc:incoming" || customType === "async-result" || customType === "advisor") {
 				const id = typeof record["id"] === "string" ? record["id"] : `entry-${this.sequence++}`;
-				const details = customType === "async-result" ? recordOf(record["details"]) : null;
-				const failed = Array.isArray(details?.["jobs"]) && details["jobs"].some(job => recordOf(job)?.["status"] === "failed");
+				const details = recordOf(record["details"]);
+				const ircId = customType === "irc:incoming" && typeof details?.["id"] === "string" ? details["id"] : undefined;
+				const previous = ircId ? this.ircMessages.get(ircId) : undefined;
+				const failed = customType === "async-result" && Array.isArray(details?.["jobs"]) && details["jobs"].some(job => recordOf(job)?.["status"] === "failed");
 				const kind = customType === "irc:incoming" ? "input" : customType === "advisor" ? "advisor" : "result";
 				const title = customType === "irc:incoming" ? "INPUT · IRC" : customType === "advisor" ? "ADVISOR" : failed ? "ASYNC ERROR" : "ASYNC RESULT";
-				this.cards.push({ id, kind, title, body: textOf(record["content"]), expanded: kind === "result" ? this.toolsExpanded : true, error: failed });
+				const card: Card = { id, kind, title, body: textOf(record["content"]), expanded: previous?.expanded ?? (kind === "result" ? this.toolsExpanded : true), error: failed };
+				if (previous) { Object.assign(previous, card); delete previous.live; }
+				else {
+					this.cards.push(card);
+					if (ircId) this.ircMessages.set(ircId, card);
+				}
 				if (kind === "input" && this.status === "ended") this.status = "running";
 				if (this.follow) this.selected = Math.max(0, this.all.length - 1);
 				return true;
@@ -263,14 +282,46 @@ export class TranscriptModel {
 	}
 
 	appendLiveEvent(type: string, text: string, toolCallId?: string): void {
-		const execution = type === "tool_execution_start" || type === "tool_execution_update";
-		if (type === "tool_execution_start" && !toolCallId) {
-			try {
-				const event = recordOf(JSON.parse(text));
-				if (typeof event?.["toolCallId"] === "string" && event["toolCallId"]) toolCallId = event["toolCallId"];
-			} catch { /* Truncated or malformed events remain separately visible. */ }
+		let event: Record<string, unknown> | null = null;
+		try { event = recordOf(JSON.parse(text)); } catch { /* Truncated events remain visible. */ }
+		const execution = type === "tool_execution_start" || type === "tool_execution_update" ||
+			type === "tool_stream_update" || type === "tool_execution_end" ||
+			type === "tool_approval_requested" || type === "tool_approval_resolved";
+		if (execution && type !== "tool_execution_update" && type !== "tool_stream_update" && !toolCallId &&
+			typeof event?.["toolCallId"] === "string" && event["toolCallId"]) toolCallId = event["toolCallId"];
+
+		if (type === "irc_message") {
+			const message = recordOf(event?.["message"]);
+			if (message?.["customType"] === "irc:incoming" && (typeof message["content"] === "string" || Array.isArray(message["content"]))) {
+				if (message["display"] === false) return;
+				const details = recordOf(message["details"]);
+				const ircId = typeof details?.["id"] === "string" ? details["id"] : undefined;
+				if (ircId && this.ircMessages.has(ircId)) return;
+				const card: Card = { id: `event-${this.sequence++}`, kind: "input", title: "INPUT · IRC", body: textOf(message["content"]), expanded: true, live: true };
+				this.cards.push(card);
+				if (ircId) this.ircMessages.set(ircId, card);
+				if (this.status === "ended") this.status = "running";
+				if (this.follow) this.selected = Math.max(0, this.all.length - 1);
+				return;
+			}
 		}
-		const previous = type === "tool_execution_update" && toolCallId ? this.executionUpdates.get(toolCallId) : undefined;
+
+		if ((type === "plan_review_requested" || type === "plan_review_resolved") && typeof event?.["reviewId"] === "string" && event["reviewId"]) {
+			const previous = this.planReviews.get(event["reviewId"]);
+			if (previous) {
+				previous.body += `\n${text}`;
+				if (type === "plan_review_resolved") previous.title = "PLAN REVIEW · resolved";
+				return;
+			}
+			const card: Card = { id: `event-${this.sequence++}`, kind: "status", title: `PLAN REVIEW · ${type === "plan_review_requested" ? "requested" : "resolved"}`, body: text, expanded: false, live: true };
+			this.cards.push(card);
+			this.planReviews.set(event["reviewId"], card);
+			if (this.follow) this.selected = Math.max(0, this.all.length - 1);
+			return;
+		}
+
+		const updateKey = (type === "tool_execution_update" || type === "tool_stream_update") && toolCallId ? `${type}:${toolCallId}` : undefined;
+		const previous = updateKey ? this.executionUpdates.get(updateKey) : undefined;
 		if (previous) {
 			previous.body = text;
 			return;
@@ -278,7 +329,7 @@ export class TranscriptModel {
 		const card: Card = { id: `event-${this.sequence++}`, kind: execution ? "execution" : "status",
 			title: `EVENT ${type}`, body: text, expanded: execution && this.toolsExpanded, live: true, toolCallId };
 		this.cards.push(card);
-		if (type === "tool_execution_update" && toolCallId) this.executionUpdates.set(toolCallId, card);
+		if (updateKey) this.executionUpdates.set(updateKey, card);
 		if (this.follow) this.selected = Math.max(0, this.all.length - 1);
 	}
 

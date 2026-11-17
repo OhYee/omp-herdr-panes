@@ -96,3 +96,55 @@ test("shows live execution progress inside its tool call", async () => {
 		await rm(dir, { recursive: true, force: true });
 	}
 }, 10000);
+
+test("renders merged tool, IRC and review events in the live viewer", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "viewer-events-"));
+	const session = join(dir, "session.jsonl");
+	await writeFile(session, `${JSON.stringify({ type: "message", message: { role: "assistant", content: [
+		{ type: "toolCall", id: "call", name: "bash", arguments: { command: "work" } },
+	] } })}\n`);
+	const bridge = new LiveBridge(() => {});
+	await bridge.ready;
+	const token = bridge.register("agent");
+	const events = new LiveEvents(bridge);
+	for (const event of [
+		{ type: "tool_approval_requested", toolCallId: "call", reason: "approval reason" },
+		{ type: "tool_execution_end", toolCallId: "call", toolName: "bash", isError: false, result: { content: [{ type: "text", text: "finished output" }] } },
+		{ type: "irc_message", message: { customType: "irc:incoming", content: "IRC hello", display: true, details: { id: "irc-1" } } },
+		{ type: "plan_review_requested", reviewId: "review-1", title: "Plan" },
+		{ type: "plan_review_resolved", reviewId: "review-1", choice: "execute" },
+	]) events.handle({ id: "agent", event });
+	let output = "";
+	let notify: (() => void) | undefined;
+	const terminal = new Bun.Terminal({
+		cols: 100, rows: 30,
+		data(_terminal, data) { output += new TextDecoder().decode(data); notify?.(); },
+	});
+	const child = Bun.spawn([Bun.which("bun")!, fileURLToPath(new URL("../src/viewer.ts", import.meta.url)),
+		session, "--socket", bridge.socketPath, "--token", token], { terminal, timeout: 8000 });
+	const waitFor = async (needle: string) => {
+		if (Bun.stripANSI(output).includes(needle)) return;
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		void child.exited.then(code => reject(new Error(`Viewer exited before ${needle} (${code})`)));
+		notify = () => { if (Bun.stripANSI(output).includes(needle)) resolve(); };
+		try { await promise; } finally { notify = undefined; }
+	};
+	try {
+		await waitFor("PLAN REVIEW · resolved");
+		terminal.write("T");
+		await waitFor("finished output");
+		const screen = Bun.stripANSI(output);
+		expect(screen).toContain("EVENT tool_approval_requested");
+		expect(screen).toContain("EVENT tool_execution_end");
+		expect(screen).toContain("INPUT · IRC");
+		expect(screen).toContain("IRC hello");
+		expect(screen).toContain("PLAN REVIEW · resolved");
+	} finally {
+		child.kill();
+		terminal.close();
+		await child.exited;
+		events.close();
+		await bridge.close();
+		await rm(dir, { recursive: true, force: true });
+	}
+}, 10000);
