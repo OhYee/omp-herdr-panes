@@ -30,6 +30,8 @@ All notable changes to this project are documented here. The format follows
 - Group tool completion, stream preview and approval events with matching calls, deduplicate live IRC
   inputs against saved messages, and combine plan review requests with their resolutions.
 - Show the resolved model on a color-coded status line and follow default/fallback model changes.
+- Show outgoing IRC messages, progress and broadcasts as output, with their matched tool events
+  and receipt retained for inspection in interactive and text viewers.
 
 ### Changed
 

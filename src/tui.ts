@@ -179,7 +179,12 @@ export class ViewerTui {
 			const indent = inTools && width > 8 && (card.kind === "tool" || card.kind === "result") ? "  " : "";
 			const marker = card.expanded ? "▾" : "▸";
 			const preview = !card.expanded ? cardSummary(card.body.split(/\r?\n/u, 1)[0] ?? "") : "";
-			const outcome = card.result ? (card.result.error ? " · error" : " · ok") : "";
+			const ends = card.ircRequest !== undefined ? card.execution?.filter(event => event.title === "EVENT tool_execution_end") ?? [] : [];
+			const failed = card.result?.error === true || ends.some(event => event.error === true);
+			const succeeded = card.result?.error === false || ends.some(event => event.error === false);
+			const outcome = card.ircRequest !== undefined
+				? failed ? " · error" : succeeded ? " · ok" : card.result || ends.length ? " · finished" : " · pending"
+				: card.result ? (card.result.error ? " · error" : " · ok") : "";
 			const label = `${indent}${index === this.model.selected ? ">" : " "} ${marker} ${cardSummary(card.title)}${outcome}${card.live ? " · live" : ""}`;
 			rows.push({ text: clip(preview ? `${label}  ${preview}` : label, width), card: index, kind: card.kind, header: true });
 			if (!card.expanded) continue;
@@ -203,10 +208,27 @@ export class ViewerTui {
 				}
 				continue;
 			}
-			if (!card.body) continue;
 			const prefix = " ".repeat(Math.min(indent.length + 4, Math.max(0, width - 2)));
-			for (const line of wrap(card.body, Math.max(1, width - prefix.length), card.kind === "tool")) {
+			if (card.body) for (const line of wrap(card.body, Math.max(1, width - prefix.length), card.kind === "tool")) {
 				rows.push({ text: clip(`${prefix}${line.text}`, width), card: index, kind: card.kind, header: false, code: line.code });
+			}
+			if (card.ircRequest !== undefined && card.ircDetailsExpanded) {
+				rows.push({ text: clip(`${prefix}REQUEST`, width), card: index, kind: "tool", header: false });
+				for (const line of wrap(card.ircRequest, Math.max(1, width - prefix.length), true)) {
+					rows.push({ text: clip(`${prefix}${line.text}`, width), card: index, kind: "tool", header: false, code: line.code });
+				}
+				for (const execution of card.execution ?? []) {
+					rows.push({ text: clip(`${prefix}${execution.title}`, width), card: index, kind: "execution", header: false });
+					for (const line of wrap(execution.body, Math.max(1, width - prefix.length), true)) {
+						rows.push({ text: clip(`${prefix}${line.text}`, width), card: index, kind: "execution", header: false, code: line.code });
+					}
+				}
+				if (card.result) {
+					rows.push({ text: clip(`${prefix}${card.result.error ? "ERROR" : "RESULT"}`, width), card: index, kind: "result", header: false });
+					for (const line of wrap(card.result.body, Math.max(1, width - prefix.length))) {
+						rows.push({ text: clip(`${prefix}${line.text}`, width), card: index, kind: "result", header: false, code: line.code });
+					}
+				}
 			}
 		}
 		return rows;

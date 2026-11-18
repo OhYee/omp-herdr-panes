@@ -1,4 +1,4 @@
-import { recordOf, sanitize, summarizeArgs } from "./render.ts";
+import { ircOutput, recordOf, sanitize, summarizeArgs } from "./render.ts";
 
 export type CardKind = "input" | "thinking" | "tools" | "tool" | "execution" | "result" | "advisor" | "output" | "status";
 
@@ -11,6 +11,8 @@ export interface Card {
 	error?: boolean;
 	live?: boolean;
 	toolCallId?: string;
+	ircRequest?: string;
+	ircDetailsExpanded?: boolean;
 	result?: Card;
 	execution?: Card[];
 }
@@ -51,6 +53,13 @@ function cardForBlock(block: unknown, id: string, live: boolean, expanded?: bool
 		const name = item["name"];
 		const intent = typeof item["intent"] === "string" ? item["intent"] : "";
 		const args = item["arguments"];
+		const irc = ircOutput(name, args);
+		if (irc) {
+			const { content: _content, ...request } = recordOf(args)!;
+			return { id, kind: "output", title: `OUTPUT · ${irc.label}`, body: irc.content, expanded: expanded ?? true, live,
+				ircRequest: pretty(intent ? { ...request, intent } : request),
+				toolCallId: typeof item["id"] === "string" && item["id"] ? item["id"] : undefined };
+		}
 		const summary = intent || summarizeArgs(args);
 		const title = summary ? `TOOL ${name} · ${summary}` : `TOOL ${name}`;
 		return { id, kind: "tool", title, body: pretty(args), expanded: expanded ?? false, live,
@@ -104,8 +113,9 @@ export class TranscriptModel {
 		const calls = new Map<string, Card | null>();
 		const results = new Map<string, Card | null>();
 		for (const card of cards) {
-			if (card.kind === "tool") { card.result = undefined; card.execution = undefined; }
-			const index = card.kind === "tool" ? calls : card.kind === "result" ? results : undefined;
+			const isCall = card.kind === "tool" || card.ircRequest !== undefined;
+			if (isCall) { card.result = undefined; card.execution = undefined; }
+			const index = isCall ? calls : card.kind === "result" ? results : undefined;
 			if (index && card.toolCallId) index.set(card.toolCallId, index.has(card.toolCallId) ? null : card);
 		}
 		const paired = new Set<Card>();
@@ -120,12 +130,24 @@ export class TranscriptModel {
 			const call = calls.get(card.toolCallId);
 			if (!call) continue;
 			let execution = card;
-			if (card.title === "EVENT tool_execution_end" && call.result) {
+			if ((card.title === "EVENT tool_execution_end" && call.result) || call.ircRequest !== undefined) {
 				try {
 					const event = recordOf(JSON.parse(card.body));
 					if (event) {
-						const { result: _result, ...metadata } = event;
-						execution = { ...card, body: pretty(metadata) };
+						let changed = false;
+						if (card.title === "EVENT tool_execution_end" && call.result && "result" in event) {
+							delete event["result"];
+							changed = true;
+						}
+						const data = recordOf(event["data"]);
+						for (const parent of [event, data]) {
+							const args = recordOf(parent?.["args"]);
+							if (call.ircRequest !== undefined && args?.["content"] === call.body) {
+								delete args["content"];
+								changed = true;
+							}
+						}
+						if (changed) execution = { ...card, body: pretty(event) };
 					}
 				} catch { /* Keep an unparseable preview visible. */ }
 			}
@@ -238,6 +260,7 @@ export class TranscriptModel {
 			for (const [index, block] of message["content"].entries()) {
 				const card = cardForBlock(block, `${id}:${index}`, false);
 				if (card) {
+					if (card.ircRequest !== undefined) card.ircDetailsExpanded = this.toolsExpanded;
 					const key = `live:${index}:${card.kind}`;
 					card.expanded = liveExpansion.get(key) ?? this.lastLiveExpansion.get(key) ??
 						(card.kind === "thinking" ? this.thinkingExpanded : card.kind === "tool" ? this.toolsExpanded : card.expanded);
@@ -265,7 +288,7 @@ export class TranscriptModel {
 			}
 		} else if (role === "toolResult" && message["content"] !== undefined) {
 			const name = typeof message["toolName"] === "string" ? message["toolName"] : "tool";
-			const error = message["isError"] === true;
+			const error = typeof message["isError"] === "boolean" ? message["isError"] : undefined;
 			added.push({ id, kind: "result", title: `${error ? "ERROR" : "RESULT"} ${name}`, body: textOf(message["content"]), expanded: this.toolsExpanded, error,
 				toolCallId: typeof message["toolCallId"] === "string" && message["toolCallId"] ? message["toolCallId"] : undefined });
 		} else return this.appendFallback(`MESSAGE ${typeof role === "string" ? role : "unknown"}`, record);
@@ -327,7 +350,8 @@ export class TranscriptModel {
 			return;
 		}
 		const card: Card = { id: `event-${this.sequence++}`, kind: execution ? "execution" : "status",
-			title: `EVENT ${type}`, body: text, expanded: execution && this.toolsExpanded, live: true, toolCallId };
+			title: `EVENT ${type}`, body: text, expanded: execution && this.toolsExpanded, live: true, toolCallId,
+			error: type === "tool_execution_end" && typeof event?.["isError"] === "boolean" ? event["isError"] : undefined };
 		this.cards.push(card);
 		if (updateKey) this.executionUpdates.set(updateKey, card);
 		if (this.follow) this.selected = Math.max(0, this.all.length - 1);
@@ -339,6 +363,7 @@ export class TranscriptModel {
 		for (const [index, block] of content.entries()) {
 			const card = cardForBlock(block, `live:${index}`, true);
 			if (!card) continue;
+			if (card.ircRequest !== undefined) card.ircDetailsExpanded = this.toolsExpanded;
 			card.expanded = old.get(`${card.id}:${card.kind}`) ??
 				(card.kind === "thinking" ? this.thinkingExpanded : card.kind === "tool" ? this.toolsExpanded : card.expanded);
 			appendCard(live, card);
@@ -400,14 +425,16 @@ export class TranscriptModel {
 			}
 		}
 		const cards = [...this.cards, ...this.live];
-		const paired = new Set(cards.flatMap(card => [...(card.result ? [card.result] : []), ...(card.execution ?? [])]));
-		const tools = cards.filter(card => (card.kind === "tool" || card.kind === "result" || card.kind === "execution") && !paired.has(card));
+		const paired = new Set(cards.flatMap(card => [...(card.result ? [card.result.id] : []), ...(card.execution ?? []).map(event => event.id)]));
+		const tools = cards.filter(card => (card.kind === "tool" || card.kind === "result" || card.kind === "execution") && !paired.has(card.id));
+		const irc = cards.filter(card => card.ircRequest !== undefined);
 		const groups = visible.filter(card => card.kind === "tools");
-		const expand = tools.length || groups.length
-			? tools.some(card => !card.expanded) || groups.some(card => !card.expanded)
+		const expand = tools.length || groups.length || irc.length
+			? tools.some(card => !card.expanded) || groups.some(card => !card.expanded) || irc.some(card => !card.ircDetailsExpanded)
 			: !this.toolsExpanded;
 		this.toolsExpanded = expand;
 		for (const card of [...tools, ...groups]) card.expanded = expand;
+		for (const card of irc) card.ircDetailsExpanded = expand;
 		for (const key of this.lastLiveExpansion.keys()) {
 			if (key.endsWith(":tool")) this.lastLiveExpansion.set(key, expand);
 		}
@@ -430,17 +457,19 @@ export class TranscriptModel {
 			}
 		}
 		const cards = [...this.cards, ...this.live];
-		const paired = new Set<Card>();
+		const paired = new Set<string>();
 		for (const card of cards) {
-			if (card.result) paired.add(card.result);
-			for (const execution of card.execution ?? []) paired.add(execution);
+			if (card.result) paired.add(card.result.id);
+			for (const execution of card.execution ?? []) paired.add(execution.id);
 		}
-		const actionable = cards.filter(card => !paired.has(card));
-		const expand = visible.some(card => !card.expanded) || actionable.some(card => !card.expanded);
+		const actionable = cards.filter(card => !paired.has(card.id));
+		const expand = visible.some(card => !card.expanded) || actionable.some(card => !card.expanded) ||
+			cards.some(card => card.ircRequest !== undefined && !card.ircDetailsExpanded);
 		this.thinkingExpanded = expand;
 		this.toolsExpanded = expand;
 		for (const card of visible) card.expanded = expand;
 		for (const card of actionable) card.expanded = expand;
+		for (const card of cards) if (card.ircRequest !== undefined) card.ircDetailsExpanded = expand;
 		const after = this.all;
 		let index = after.findIndex(card => card.id === selected?.id);
 		if (index < 0 && parentId) index = after.findIndex(card => card.id === parentId);

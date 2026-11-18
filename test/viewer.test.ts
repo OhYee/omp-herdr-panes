@@ -119,3 +119,38 @@ test.skipIf(!tmux || !bun)("a late root sibling does not move an existing grandc
 		rmSync(dir, { recursive: true, force: true });
 	}
 }, 30000);
+
+test.skipIf(!bun)("non-interactive viewer associates outgoing IRC with its persisted failure", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "omp-viewer-irc-"));
+	const session = join(dir, "session.jsonl");
+	const entries = [
+		{ type: "message", message: { role: "assistant", content: [
+			{ type: "toolCall", id: "send", name: "write", arguments: { path: "agent://Main?progress", content: "progress body" } },
+		] } },
+		{ type: "custom", customType: "tool_execution_start", data: { toolCallId: "send", args: { path: "agent://Main?progress" } } },
+		{ type: "message", message: { role: "toolResult", toolCallId: "send", toolName: "write", isError: true, content: "delivery failed" } },
+	];
+	writeFileSync(session, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
+	const viewer = fileURLToPath(new URL("../src/viewer.ts", import.meta.url));
+	const child = Bun.spawn([bun!, viewer, session], { stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 8000 });
+	const reader = child.stdout.getReader();
+	let output = "";
+	try {
+		while (!output.includes("delivery failed")) {
+			const chunk = await reader.read();
+			if (chunk.done) throw new Error("Viewer exited before the IRC receipt");
+			output += new TextDecoder().decode(chunk.value);
+		}
+		const text = Bun.stripANSI(output);
+		expect(text).toContain("OUTPUT · IRC progress → Main");
+		expect(text).toContain("IRC progress → Main · tool_execution_start");
+		expect(text).toContain("✗ IRC progress → Main");
+		expect(text.split("progress body")).toHaveLength(2);
+		expect(text).not.toContain("✓ IRC progress → Main");
+	} finally {
+		child.kill();
+		await child.exited;
+		await reader.cancel();
+		rmSync(dir, { recursive: true, force: true });
+	}
+}, 10000);

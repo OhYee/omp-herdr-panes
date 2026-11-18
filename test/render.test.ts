@@ -287,3 +287,41 @@ test("user messages skip the assignment preamble and cap at 6 lines", () => {
 	expect(lines.join("\n")).not.toContain("six");
 	expect(render(user("# Target"), { color: true })[0]).toBe("\x1b[1mTask:\x1b[0m");
 });
+
+test("renders outgoing IRC messages, progress and broadcasts without changing ordinary writes", () => {
+	const call = (name: string, path: string, content?: unknown) => assistant({
+		type: "toolCall", name, arguments: { path, ...(content === undefined ? {} : { content }) },
+	});
+	expect(render(call("write", "agent://Main", "hello\n  detail"))).toEqual([
+		"OUTPUT · IRC → Main", "hello", "  detail",
+	]);
+	expect(render(call("write", "agent://Main?progress", "working"))[0]).toBe("OUTPUT · IRC progress → Main");
+	expect(render(call("write", "agent://all", "hello"))[0]).toBe("OUTPUT · IRC → all (broadcast)");
+	expect(render(call("write", "notes.txt", "file"))[0]).toBe("▸ write  notes.txt");
+	expect(render(call("read", "agent://Main", "file"))[0]).toBe("▸ read  agent://Main");
+	expect(render(call("write", "agent://Main"))[0]).toBe("▸ write  agent://Main");
+	expect(render(call("write", "agent://", "missing recipient"))[0]).toBe("▸ write  agent://");
+	expect(render(call("write", "agent://Main", 42))[0]).toBe("▸ write  agent://Main");
+	expect(render(call("write", "agent://Main", "\x1b[31mred\x1b[0m"))).toEqual(["OUTPUT · IRC → Main", "red"]);
+});
+
+test("associates text-mode IRC execution and receipts by unique call ID", () => {
+	const ircCalls: NonNullable<RenderOptions["ircCalls"]> = new Map();
+	const options = { ircCalls };
+	render(assistant({ type: "toolCall", id: "send", name: "write", arguments: { path: "agent://Main", content: "body" } }), options);
+	const start = render({ type: "custom", customType: "tool_execution_start", data: {
+		toolCallId: "send", args: { path: "agent://Main", content: "body" }, intent: "sending",
+	} }, options).join("\n");
+	expect(start).toContain("IRC → Main · tool_execution_start");
+	expect(start).toContain("sending");
+	expect(start).not.toContain('"content": "body"');
+	const receipt = (isError?: boolean) => ({ type: "message", message: {
+		role: "toolResult", toolName: "write", toolCallId: "send", content: "receipt",
+		...(isError === undefined ? {} : { isError }),
+	} });
+	expect(render(receipt(true), options)[0]).toContain("✗ IRC → Main");
+	expect(render(receipt(false), options)[0]).toContain("✓ IRC → Main");
+	expect(render(receipt(), options)[0]).toContain("· IRC → Main");
+	render(assistant({ type: "toolCall", id: "send", name: "write", arguments: { path: "notes.txt", content: "other" } }), options);
+	expect(render(receipt(true), options)[0]).toContain("✗ write");
+});

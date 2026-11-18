@@ -26,7 +26,11 @@ itself by default a few seconds after its subagent finishes, and your omp pane g
 - **Live updates**: assistant text, thinking and tool-call snapshots stream from omp events;
   completed messages and tool results are read from the session transcript.
 - **Agent messages**: incoming IRC appears as `INPUT · IRC`, with live and saved copies matched by
-  message ID. Background completions appear as tool results, and advisor feedback as `ADVISOR`;
+  message ID. Outgoing `write agent://…` messages appear as expanded `OUTPUT · IRC → recipient`
+  items; progress messages and broadcasts are labeled separately. Their status reflects the tool
+  outcome, not whether the recipient has read them. Press `T` to inspect the associated request,
+  execution events and receipt. The text viewer also identifies matching IRC receipts.
+  Background completions appear as tool results, and advisor feedback as `ADVISOR`;
   other custom messages retain their JSON fallback. Plan review requests and resolutions share a card.
 - **Nested subagents too**: each viewer's children appear to its right, recursively
   (e.g. `Outer · task` → `Outer.Inner · sonic`).

@@ -17,7 +17,7 @@ import { PaneManager } from "./pane-manager.ts";
 import { SessionTree } from "./session-tree.ts";
 import { createTernBackend, createTmuxBackend, detectPaneContext, type PaneBackend } from "./terminal-backend.ts";
 import { createLineSplitter } from "./line-splitter.ts";
-import { type SessionTotals, recordOf, renderEntry, sanitize, usageOf } from "./render.ts";
+import { type RenderOptions, type SessionTotals, recordOf, renderEntry, sanitize, usageOf } from "./render.ts";
 import { TranscriptModel } from "./tui-model.ts";
 import { ViewerTui } from "./tui.ts";
 import { resolveSessionFile } from "./session-file.ts";
@@ -53,6 +53,7 @@ interface ViewerOptions {
 /** Per-session accounting shared between the tail loop and the renderer. */
 interface TailState {
 	totals: SessionTotals;
+	ircCalls: NonNullable<RenderOptions["ircCalls"]>;
 	startMs: number | null;
 	onSessionExit: () => void;
 	model?: TranscriptModel;
@@ -218,6 +219,7 @@ function renderTranscriptLine(line: string, options: ViewerOptions, state: TailS
 		color: process.stdout.isTTY === true,
 		thinkingLines: options.thinkingLines,
 		totals: state.totals,
+		ircCalls: state.ircCalls,
 	});
 	if (rendered.length === 0) return; // entry types the renderer ignores produce no blank lines
 	process.stdout.write(`${rendered.join("\n")}\n`);
@@ -249,6 +251,7 @@ async function startTailLoop(options: ViewerOptions, model?: TranscriptModel, tu
 
 	const state: TailState = {
 		totals: { tokens: 0, cost: 0, durationMs: null },
+		ircCalls: new Map(),
 		startMs: null,
 		model,
 		tui,
@@ -265,6 +268,7 @@ async function startTailLoop(options: ViewerOptions, model?: TranscriptModel, tu
 		if (size < offset) {
 			offset = 0; // truncated or replaced
 			splitter.reset();
+			state.ircCalls.clear();
 			if (state.model) {
 				state.model.cards = [];
 				state.model.selected = 0;

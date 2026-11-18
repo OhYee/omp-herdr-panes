@@ -517,3 +517,60 @@ test("groups plan review states by review ID and preserves unrelated lifecycle e
 	expect(model.all[0]?.body).toContain('"choice":"execute"');
 	expect(model.all[1]?.body).not.toContain('"choice"');
 });
+
+test("streams an outgoing IRC call once and keeps its matched execution and failure details", () => {
+	const model = new TranscriptModel();
+	const call = (content?: string) => ({ type: "toolCall", id: "irc-call", name: "write",
+		arguments: { path: "agent://Main", ...(content === undefined ? {} : { content }), i: "Sending update" } });
+	model.setLive([call()]);
+	expect(model.all[0]?.kind).toBe("tool");
+	model.setLive([call("first")]);
+	expect(model.all[0]).toMatchObject({ kind: "output", title: "OUTPUT · IRC → Main", body: "first", expanded: true });
+	model.toggleTools();
+	model.setLive([call("first\n  second")]);
+	model.appendLiveEvent("tool_execution_start", JSON.stringify({ toolCallId: "irc-call", args: { path: "agent://Main", content: "first\n  second" } }));
+	model.appendLiveEvent("tool_execution_update", "old progress", "irc-call");
+	model.appendLiveEvent("tool_execution_update", "latest progress", "irc-call");
+	model.appendLiveEvent("tool_execution_end", JSON.stringify({ toolCallId: "irc-call", isError: true, result: "send failed" }), "irc-call");
+	model.clearLive();
+	model.append(message("assistant", [call("first\n  second")]));
+	model.append(message("toolResult", "send failed", { toolName: "write", toolCallId: "irc-call", isError: true }));
+	expect(model.all).toHaveLength(1);
+	const output = model.all[0]!;
+	expect(output).toMatchObject({ kind: "output", body: "first\n  second", ircDetailsExpanded: true, result: { error: true, body: "send failed" } });
+	expect(output.ircRequest).toContain("agent://Main");
+	expect(output.ircRequest).not.toContain("first");
+	expect(output.execution?.map(event => event.title)).toEqual(["EVENT tool_execution_start", "EVENT tool_execution_update", "EVENT tool_execution_end"]);
+	expect(output.execution?.[0]?.body).not.toContain("first");
+	expect(output.execution?.[1]?.body).toBe("latest progress");
+	expect(output.execution?.[2]?.body).not.toContain("send failed");
+});
+
+test("distinguishes IRC progress and broadcast while preserving unrelated writes and ambiguous results", () => {
+	const model = new TranscriptModel();
+	model.append(message("assistant", [
+		{ type: "toolCall", id: "progress", name: "write", arguments: { path: "agent://Main?progress", content: "working" } },
+		{ type: "toolCall", id: "broadcast", name: "write", arguments: { path: "agent://all", content: "hello all" } },
+		{ type: "toolCall", id: "file", name: "write", arguments: { path: "notes.txt", content: "file contents" } },
+		{ type: "toolCall", id: "read", name: "read", arguments: { path: "agent://Main" } },
+		{ type: "toolCall", id: "missing", name: "write", arguments: { path: "agent://Main" } },
+	]));
+	model.append(message("toolResult", "broadcast rejected", { toolCallId: "broadcast", toolName: "write", isError: true }));
+	model.append(message("toolResult", "progress accepted", { toolCallId: "progress", toolName: "write", isError: false }));
+	expect(model.all.map(card => card.title)).toEqual([
+		"OUTPUT · IRC progress → Main", "OUTPUT · IRC → all (broadcast)", "TOOLS: 3",
+	]);
+	expect(model.all[0]?.result?.body).toBe("progress accepted");
+	expect(model.all[1]?.result).toMatchObject({ body: "broadcast rejected", error: true });
+	model.toggleTools();
+	expect(model.all.slice(3).map(card => card.kind)).toEqual(["tool", "tool", "tool"]);
+
+	const ambiguous = new TranscriptModel();
+	ambiguous.append(message("assistant", [
+		{ type: "toolCall", id: "same", name: "write", arguments: { path: "agent://Main", content: "one" } },
+		{ type: "toolCall", id: "same", name: "write", arguments: { path: "agent://Other", content: "two" } },
+	]));
+	ambiguous.append(message("toolResult", "unknown recipient", { toolCallId: "same", toolName: "write", isError: true }));
+	expect(ambiguous.all.map(card => card.kind)).toEqual(["output", "output", "result"]);
+	expect(ambiguous.all[0]?.result).toBeUndefined();
+});

@@ -1,7 +1,7 @@
 /**
- * Pure renderer for subagent transcript entries.
+ * Transcript renderer for subagent entries.
  *
- * No I/O: it maps one parsed JSONL entry of a subagent transcript to display lines.
+ * No I/O: it maps one parsed JSONL entry to display lines and can index IRC calls for receipts.
  * Unknown entries fall back to their JSON representation. `renderEntry` never throws.
  */
 
@@ -14,6 +14,8 @@ export interface RenderOptions {
 	thinkingLines: number;
 	/** Session totals accumulated by the viewer; shown on `session_exit` when supplied. */
 	totals?: SessionTotals;
+	/** Calls seen by a streaming text viewer, for associating IRC receipts with their recipients. */
+	ircCalls?: Map<string, IrcOutput | null>;
 }
 
 /** Token/cost/duration totals accumulated across one transcript session. */
@@ -21,6 +23,11 @@ export interface SessionTotals {
 	tokens: number;
 	cost: number;
 	durationMs: number | null;
+}
+
+interface IrcOutput {
+	label: string;
+	content: string;
 }
 
 type Style = "bold" | "red" | "green" | "cyan";
@@ -47,6 +54,7 @@ const SUMMARY_KEYS = ["command", "path", "pattern", "query", "url", "task", "cod
 /** Turn one parsed JSONL entry into display lines, falling back to JSON. Never throws. */
 export function renderEntry(entry: unknown, options: RenderOptions): string[] {
 	try {
+		if (options.ircCalls) indexIrcCalls(entry, options.ircCalls);
 		const record = recordOf(entry);
 		const type = record?.["type"];
 		const rendered = record === null ? [] :
@@ -95,6 +103,29 @@ export function summarizeArgs(args: unknown): string {
 		}
 	}
 	return stringifyCollapsed(args);
+}
+
+/** Identify a complete agent message without treating ordinary writes as IRC. */
+export function ircOutput(name: unknown, args: unknown): IrcOutput | null {
+	const record = recordOf(args);
+	if (name !== "write" || typeof record?.["path"] !== "string" || typeof record["content"] !== "string") return null;
+	const match = /^agent:\/\/([^\s/?#]+)(?:\?([^#]*))?$/u.exec(record["path"]);
+	if (!match) return null;
+	const recipient = match[1] === "all" ? "all (broadcast)" : match[1]!;
+	const progress = new URLSearchParams(match[2] ?? "").has("progress") ? " progress" : "";
+	return { label: `IRC${progress} → ${recipient}`, content: record["content"] };
+}
+
+function indexIrcCalls(entry: unknown, calls: Map<string, IrcOutput | null>): void {
+	const record = recordOf(entry);
+	const message = record?.["type"] === "message" ? recordOf(record["message"]) : null;
+	if (message?.["role"] !== "assistant" || !Array.isArray(message["content"])) return;
+	for (const raw of message["content"]) {
+		const block = recordOf(raw);
+		const id = block?.["id"];
+		if (block?.["type"] !== "toolCall" || typeof id !== "string" || !id) continue;
+		calls.set(id, calls.has(id) ? null : ircOutput(block["name"], block["arguments"]));
+	}
 }
 
 /**
@@ -218,6 +249,23 @@ function renderTextBlock(record: Record<string, unknown>, options: RenderOptions
 function renderToolCallBlock(record: Record<string, unknown>, options: RenderOptions): string[] {
 	const name = stringProp(record, "name");
 	if (name === null || name.length === 0) return [];
+	const irc = ircOutput(name, record["arguments"]);
+	if (irc) {
+		const title = composeLine([{ text: `OUTPUT · ${irc.label}`, style: "bold" }], options, true);
+		const lines: string[] = [];
+		const width = normalizeWidth(options.width);
+		for (const line of sanitize(irc.content).split("\n")) {
+			let rest = line;
+			while (Bun.stringWidth(rest) > width) {
+				const part = sliceVisible(rest, width);
+				if (!part) break;
+				lines.push(part);
+				rest = rest.slice(part.length);
+			}
+			lines.push(rest);
+		}
+		return [title, ...lines];
+	}
 	const intent = stringProp(record, "intent");
 	const collapsedIntent = intent === null ? "" : collapseWhitespace(intent);
 	let summary: string;
@@ -257,12 +305,16 @@ function renderToolResultMessage(message: Record<string, unknown>, options: Rend
 	const content = message["content"];
 	if (!Array.isArray(content) && typeof content !== "string") return [];
 	const lines = nonEmptyLines(typeof content === "string" ? content : joinTextBlocks(content));
+	const toolName = stringProp(message, "toolName");
+	const callId = stringProp(message, "toolCallId");
+	const irc = callId ? options.ircCalls?.get(callId) : undefined;
+	const unknown = irc && typeof message["isError"] !== "boolean";
 	const segments: Segment[] = [
 		{ text: "  ", style: null },
-		{ text: isError ? "✗" : "✓", style: isError ? "red" : "green" },
+		{ text: unknown ? "·" : isError ? "✗" : "✓", style: unknown ? null : isError ? "red" : "green" },
 	];
-	const toolName = stringProp(message, "toolName");
-	if (toolName !== null && toolName.length > 0) segments.push({ text: ` ${toolName} `, style: "cyan" });
+	if (irc) segments.push({ text: ` ${irc.label} `, style: "cyan" });
+	else if (toolName !== null && toolName.length > 0) segments.push({ text: ` ${toolName} `, style: "cyan" });
 	const first = lines[0];
 	if (first === undefined) {
 		segments.push({ text: " (no output)", style: null });
@@ -275,6 +327,20 @@ function renderToolResultMessage(message: Record<string, unknown>, options: Rend
 }
 
 function renderCustom(record: Record<string, unknown>, options: RenderOptions): string[] {
+	if (record["customType"] === "tool_execution_start") {
+		const data = recordOf(record["data"]);
+		const id = typeof data?.["toolCallId"] === "string" ? data["toolCallId"] : "";
+		const irc = id ? options.ircCalls?.get(id) : undefined;
+		if (irc) {
+			const args = recordOf(data?.["args"]);
+			if (args?.["content"] === irc.content) {
+				const { content: _content, ...rest } = args;
+				return [composeLine([{ text: `${irc.label} · tool_execution_start`, style: "cyan" }], options, true),
+					...renderFallback({ ...record, data: { ...data, args: rest } }, options)];
+			}
+			return [composeLine([{ text: `${irc.label} · tool_execution_start`, style: "cyan" }], options, true), ...renderFallback(record, options)];
+		}
+	}
 	if (record["customType"] !== "session_exit") return [];
 	const parts: string[] = [];
 	const totals = options.totals;
