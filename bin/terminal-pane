@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""Open a command in a Tern, Herdr, or tmux pane; see --help."""
+import argparse
+import json
+import math
+import os
+import shlex
+import subprocess
+import sys
+import time
+
+# Cron often supplies only /usr/bin:/bin; preserve caller precedence without empty cwd entries.
+search_path = [entry for entry in (os.environ.get("PATH") or os.defpath).split(os.pathsep) if entry]
+search_path.extend([
+    os.path.expanduser("~/.local/bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+])
+os.environ["PATH"] = os.pathsep.join(search_path)
+
+
+def call(*args, json_result=False, timeout=90):
+    result = subprocess.run(args, text=True, capture_output=True, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError(f"{args[0]} failed: {(result.stderr or result.stdout).strip()}")
+    if json_result:
+        return json.loads(result.stdout)
+    return result.stdout.strip()
+
+
+def unique(items, description):
+    if len(items) > 1:
+        raise RuntimeError(f"multiple matching {description}; refusing to choose")
+    return items[0] if items else None
+
+
+def tern(args, command):
+    def invoke(*parts):
+        return call("tern", *parts, json_result=True)
+
+    launch = ["--cwd", args.cwd, "--keep-open", "--json"]
+    if command:
+        launch += ["--", *command]
+    if args.session:
+        sessions = invoke("ls", "--json")["sessions"]
+        session = unique([s for s in sessions if s["name"] == args.session], "Tern sessions")
+        if not session:
+            created = invoke("new", "session", args.session, *launch)
+            if args.tab:
+                invoke("rename", str(created["block"]), args.tab, "--json")
+            return created["block"]
+        if args.mode == "right":
+            tab = unique([t for t in session["tabs"] if t["name"] == args.tab], "Tern tabs")
+            if tab:
+                block = next((b for b in tab["blocks"] if b["focused"]), tab["blocks"][0])
+                return invoke("split", str(block["id"]), "right", *launch)["block"]
+        created = invoke("new", "tab", str(session["id"]), *launch)
+        if args.tab:
+            invoke("rename", str(created["block"]), args.tab, "--json")
+        return created["block"]
+    pane = os.environ.get("TERN_PANE")
+    if not pane:
+        raise RuntimeError("current Tern pane unavailable; specify --session")
+    if args.mode == "right":
+        return invoke("split", pane, "right", *launch)["block"]
+    sessions = invoke("ls", "--json")["sessions"]
+    session = unique([s for s in sessions if any(
+        str(b["id"]) == pane for t in s["tabs"] for b in t["blocks"]
+    )], "Tern sessions containing current pane")
+    if not session:
+        raise RuntimeError("current Tern pane not found")
+    created = invoke("new", "tab", str(session["id"]), *launch)
+    if args.tab:
+        invoke("rename", str(created["block"]), args.tab, "--json")
+    return created["block"]
+
+
+def herdr_prefix(args):
+    prefix = ["herdr"]
+    if args.herdr_session:
+        prefix += ["--session", args.herdr_session]
+    elif os.environ.get("HERDR_ENV") != "1":
+        prefix += ["--session", "default"]
+
+    return prefix
+
+
+def herdr(args, command):
+    prefix = herdr_prefix(args)
+
+    def invoke(*parts):
+        result = call(*prefix, *parts, json_result=True)
+        return result["result"]
+
+    if args.session:
+        workspaces = invoke("workspace", "list")["workspaces"]
+        workspace = unique([w for w in workspaces if w["label"] == args.session], "Herdr workspaces")
+        if not workspace:
+            created = invoke("workspace", "create", "--label", args.session, "--cwd", args.cwd, "--no-focus")
+            if args.tab:
+                invoke("tab", "rename", created["tab"]["tab_id"], args.tab)
+            pane = created["root_pane"]["pane_id"]
+        else:
+            wid = workspace["workspace_id"]
+            tabs = invoke("tab", "list", "--workspace", wid)["tabs"]
+            tab = unique([t for t in tabs if t["label"] == args.tab], "Herdr tabs") if args.mode == "right" else None
+            if tab:
+                panes = invoke("pane", "list", "--workspace", wid)["panes"]
+                target = next(p["pane_id"] for p in panes if p["tab_id"] == tab["tab_id"])
+                pane = invoke("pane", "split", target, "--direction", "right", "--cwd", args.cwd, "--no-focus")["pane"]["pane_id"]
+            else:
+                options = ["--workspace", wid, "--cwd", args.cwd, "--no-focus"]
+                if args.tab:
+                    options += ["--label", args.tab]
+                pane = invoke("tab", "create", *options)["root_pane"]["pane_id"]
+    elif args.mode == "right":
+        if not os.environ.get("HERDR_PANE_ID"):
+            raise RuntimeError("current Herdr pane unavailable; specify --session and --tab")
+        pane = invoke("pane", "split", "--current", "--direction", "right", "--cwd", args.cwd, "--no-focus")["pane"]["pane_id"]
+    else:
+        workspace = os.environ.get("HERDR_WORKSPACE_ID") if os.environ.get("HERDR_ENV") == "1" else None
+        if not workspace:
+            raise RuntimeError("current Herdr workspace unavailable; specify --session")
+        options = ["--workspace", workspace, "--cwd", args.cwd, "--no-focus"]
+        if args.tab:
+            options += ["--label", args.tab]
+        pane = invoke("tab", "create", *options)["root_pane"]["pane_id"]
+    if command:
+        # Herdr accepts shell text, not argv. Quote each original argument as one shell word.
+        call(*prefix, "pane", "run", pane, shlex.join(command))
+    return pane
+
+
+def tmux(args, command):
+    fmt = "#{pane_id}"
+    launch = ["-c", args.cwd, "-P", "-F", fmt]
+    # More than one argument makes tmux exec argv directly, rather than invoking a shell.
+    if command:
+        launch += ["env", *command]
+    if args.session:
+        exists = subprocess.run(["tmux", "has-session", "-t", "=" + args.session], capture_output=True).returncode == 0
+        if not exists:
+            options = ["-d", "-s", args.session]
+            if args.tab:
+                options += ["-n", args.tab]
+            return call("tmux", "new-session", *options, *launch)
+        if args.mode == "right":
+            rows = call("tmux", "list-windows", "-t", "=" + args.session, "-F", "#{window_id}\t#{window_name}").splitlines()
+            matches = [row.split("\t", 1)[0] for row in rows if row.split("\t", 1)[1] == args.tab]
+            window = unique(matches, "tmux windows")
+            if window:
+                return call("tmux", "split-window", "-d", "-h", "-t", window, *launch)
+        options = ["-d", "-t", "=" + args.session]
+        if args.tab:
+            options += ["-n", args.tab]
+        return call("tmux", "new-window", *options, *launch)
+    pane = os.environ.get("TMUX_PANE")
+    if not pane:
+        raise RuntimeError("current tmux pane unavailable; specify --session")
+    if args.mode == "right":
+        return call("tmux", "split-window", "-d", "-h", "-t", pane, *launch)
+    session = call("tmux", "display-message", "-p", "-t", pane, "#{session_id}")
+    options = ["-d", "-t", session]
+    if args.tab:
+        options += ["-n", args.tab]
+    return call("tmux", "new-window", *options, *launch)
+
+
+def wait_output(args, pane):
+    deadline = time.monotonic() + args.wait_timeout
+    if args.backend == "herdr":
+        milliseconds = max(1, math.ceil(args.wait_timeout * 1000))
+        try:
+            call(*herdr_prefix(args), "pane", "wait-output", str(pane),
+                 "--match", args.wait_output, "--timeout", str(milliseconds),
+                 timeout=args.wait_timeout)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"timed out waiting for output in pane {pane}") from None
+        return
+
+    capture = (["tern", "capture", str(pane), "--surfaces", "--scrollback"]
+               if args.backend == "tern"
+               else ["tmux", "capture-pane", "-p", "-t", str(pane), "-S", "-"])
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"timed out waiting for output in pane {pane}")
+        try:
+            output = call(*capture, timeout=remaining)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"timed out waiting for output in pane {pane}") from None
+        if args.wait_output in output:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.1, remaining))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Launch a command in a terminal pane and print its backend and pane ID as JSON.",
+        epilog=("Auto detection checks tmux, Herdr, then Tern. Outside a terminal, specify a backend and named session. "
+                "A missing named session or tab is created. Example: terminal-pane --backend tern --session alerts "
+                "--tab incident --mode tab -- tail -f /tmp/log"))
+    parser.add_argument("--backend", choices=("auto", "tern", "herdr", "tmux"),
+                        default=os.environ.get("TERMINAL_PANE_BACKEND", "auto"),
+                        help="terminal backend (default: auto, or TERMINAL_PANE_BACKEND)")
+    parser.add_argument("--mode", choices=("right", "tab"), default="right", help="right: split target tab, creating it if missing; tab: create a new tab")
+    parser.add_argument("--session", help="Tern session, Herdr workspace, or tmux session name")
+    parser.add_argument("--tab", help="target tab/window name (required with --session in right mode)")
+    parser.add_argument("--herdr-session", help="Herdr server session; defaults to current context or default")
+    parser.add_argument("--cwd", default=os.getcwd(), help="working directory for the new pane")
+    parser.add_argument("--wait-output", help="wait until this literal text appears in the new pane")
+    parser.add_argument("--wait-timeout", type=float, default=30,
+                        help="maximum output wait in seconds (default: 30)")
+    parser.add_argument("command", nargs=argparse.REMAINDER, help="command and arguments after --; omit for an interactive shell")
+    args = parser.parse_args()
+    if not math.isfinite(args.wait_timeout) or args.wait_timeout <= 0:
+        parser.error("--wait-timeout must be a positive finite number")
+    if args.wait_output == "":
+        parser.error("--wait-output must be nonempty")
+    if args.backend not in ("auto", "tern", "herdr", "tmux"):
+        parser.error("TERMINAL_PANE_BACKEND must be auto, tern, herdr, or tmux")
+    if args.command and args.command[0] == "--":
+        args.command.pop(0)
+    for name in ("session", "tab", "herdr_session"):
+        value = getattr(args, name)
+        if value is not None and (not value.strip() or "\n" in value or "\t" in value):
+            parser.error(f"--{name.replace('_', '-')} must be nonempty and contain no tab or newline")
+    if args.session and args.mode == "right" and not args.tab:
+        parser.error("--session in right mode requires --tab")
+    if args.backend == "auto":
+        if os.environ.get("TMUX") and os.environ.get("TMUX_PANE"):
+            args.backend = "tmux"
+        elif os.environ.get("HERDR_ENV") == "1" and os.environ.get("HERDR_PANE_ID"):
+            args.backend = "herdr"
+        elif os.environ.get("TERN_PANE"):
+            args.backend = "tern"
+        else:
+            parser.error("no current terminal detected; specify --backend explicitly")
+    if args.herdr_session and args.backend != "herdr":
+        parser.error("--herdr-session requires the Herdr backend")
+    if args.herdr_session and not args.session:
+        parser.error("--herdr-session requires --session to avoid targeting another server's current pane")
+    pane = {"tern": tern, "herdr": herdr, "tmux": tmux}[args.backend](args, args.command)
+    if args.wait_output is not None:
+        wait_output(args, pane)
+    print(json.dumps({"backend": args.backend, "pane": pane}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError, KeyError, StopIteration) as exc:
+        print(f"terminal-pane: {exc}", file=sys.stderr)
+        sys.exit(1)

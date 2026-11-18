@@ -1,4 +1,4 @@
-# omp-herdr-panes
+# omp-panes
 
 Watch [omp](https://github.com/oh-my-pi) subagents work live in Herdr, Tern, or tmux panes.
 
@@ -58,22 +58,23 @@ No `npm install` is needed at runtime. The viewer uses standalone Bun.
 
 ## Install
 
-Install directly from the maintained GitHub repository:
+Link a local checkout:
 
 ```sh
-omp plugin install github:OhYee/omp-herdr-panes
+omp plugin link /absolute/path/to/omp-panes
 ```
 
-For local development, link a checkout instead:
+To expose the standalone CLI, create a symlink when `~/.local/bin/terminal-pane` is not already
+in use:
 
 ```sh
-omp plugin link /absolute/path/to/omp-herdr-panes
+ln -s ~/.omp/plugins/node_modules/omp-panes/bin/terminal-pane ~/.local/bin/terminal-pane
 ```
 
 Restart omp inside a supported pane to activate it. To try it once without installing:
 
 ```sh
-omp -e /absolute/path/to/omp-herdr-panes/src/index.ts
+omp -e /absolute/path/to/omp-panes/src/index.ts
 ```
 
 ## Usage
@@ -93,7 +94,7 @@ You can also click an item header to toggle it or use the mouse wheel to scroll.
 The viewer can also open an existing OMP session independently, by ID or ID prefix:
 
 ```sh
-bun /absolute/path/to/omp-herdr-panes/src/viewer.ts 01a1dfc5
+bun /absolute/path/to/omp-panes/src/viewer.ts 01a1dfc5
 ```
 
 For a custom session root, add `--session-dir /path/to/sessions`. A JSONL file path is also
@@ -104,6 +105,29 @@ file updates; it cannot receive unpersisted live events without the plugin's pri
 Closing the viewer closes the descendant panes it created. Without a supported pane or a TTY,
 it still displays the transcript but does not create panes. `OMP_HERDR_PANES=0` also disables
 automatic child panes for an independent viewer.
+
+## Standalone terminal command
+
+The package includes `bin/terminal-pane`. It opens a command in a Herdr, Tern or tmux pane
+and prints a JSON object containing the backend and pane ID. Add the command to your `PATH`,
+or invoke it by its absolute path.
+
+```sh
+# Split the calling pane to the right, detecting its terminal.
+terminal-pane -- htop
+
+# Create a tab in a named session/workspace, suitable for cron.
+terminal-pane --backend tern --session alerts --tab incident --mode tab -- tail -f /tmp/log
+
+# Split an existing named tab, or create the session/tab if absent.
+terminal-pane --backend herdr --session daily --tab 2026-11-18 --mode right -- omp
+```
+
+Set `TERMINAL_PANE_BACKEND=tern|herdr|tmux` to choose a default backend. Without a current
+terminal, select a backend and a named session explicitly. `--cwd` selects the working
+directory; `--wait-output TEXT --wait-timeout SECONDS` waits for text from the new pane and
+reports a timeout instead of treating pane creation as application readiness. Run
+`terminal-pane --help` for all options.
 
 ## Configuration
 
@@ -155,7 +179,7 @@ OMP_HERDR_PANES_CLOSE_DELAY_MS=30000 OMP_HERDR_PANES_FAIL_DELAY_MS=60000 omp
 
 - Turn it off for now: start omp with `OMP_HERDR_PANES=0`.
 
-- Remove the link with `omp plugin uninstall omp-herdr-panes`. If configured manually, remove its
+- Remove the link with `omp plugin uninstall omp-panes`. If configured manually, remove its
   `extensions:` entry instead. The checked-out source directory is not deleted automatically.
 
 ## Performance
@@ -202,7 +226,7 @@ omp session ── lifecycle and subagent events ──▶ src/index.ts
 - **Replay an old transcript** to see what a pane would show:
 
   ```sh
-  bun /absolute/path/to/omp-herdr-panes/src/viewer.ts path/to/Subagent.jsonl --title demo
+  bun /absolute/path/to/omp-panes/src/viewer.ts path/to/Subagent.jsonl --title demo
   ```
 
 ## Development

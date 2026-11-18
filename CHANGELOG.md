@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Support Tern and tmux alongside Herdr for subagent viewers.
+- Include the standalone `terminal-pane` command for named sessions, tabs, splits, and output readiness.
 - Interactive viewer with folding, mouse and Vim navigation, distinct content colors, and
   lightweight highlighting of fenced code and tool arguments.
 - Stream subagent thinking, text and tool calls from live events while retaining JSONL as the
@@ -88,6 +90,6 @@ All notable changes to this project are documented here. The format follows
 - First release: one read-only Herdr pane per omp subagent, stacked to the right of omp, streaming
   task, thinking, tool calls and results live, and closing a few seconds after the subagent ends.
 
-[Unreleased]: https://github.com/OhYee/omp-herdr-panes/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/OhYee/omp-panes/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/bekto/omp-herdr-panes/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/bekto/omp-herdr-panes/releases/tag/v0.1.0
