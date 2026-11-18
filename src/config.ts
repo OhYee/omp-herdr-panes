@@ -5,10 +5,12 @@
  * invalid value never disables the feature, it only falls back to its documented default.
  */
 
+import { detectPaneContext } from "./terminal-backend.ts";
+
 export interface Config {
-	/** Pane running omp (`HERDR_PANE_ID`). The stack is created to its right. */
+	/** Pane running omp; its pane stack is created to its right. */
 	mainPaneId: string;
-	/** Width share kept by the main pane on the first split. */
+	/** Width share kept by the main pane on the first split when supported by the backend. */
 	ratio: number;
 	/** Whether finished panes close automatically. */
 	autoClose: boolean;
@@ -52,17 +54,16 @@ function isMaxPanes(value: number): boolean {
 }
 
 /**
- * Builds the config from the process environment.
- * Returns `null` outside Herdr or when `OMP_HERDR_PANES` is `0`, unless `includeDisabled` is set.
- * Invalid numbers fall back to their defaults, per field.
+ * Builds the config from an inherited Herdr, tmux, or Tern pane identity.
+ * Returns `null` outside a supported terminal or when disabled, unless `includeDisabled` is set.
  */
 export function readConfig(env: Record<string, string | undefined>, includeDisabled = false): Config | null {
-	const mainPaneId = env["HERDR_PANE_ID"];
-	if (mainPaneId === undefined || mainPaneId === "") return null;
+	const pane = detectPaneContext(env);
+	if (pane === null) return null;
 	if (!includeDisabled && env["OMP_HERDR_PANES"] === "0") return null;
 
 	return {
-		mainPaneId,
+		mainPaneId: pane.paneId,
 		ratio: readNumber(env["OMP_HERDR_PANES_RATIO"], DEFAULT_RATIO, isRatio),
 		autoClose: env["OMP_HERDR_PANES_AUTO_CLOSE"] !== "0",
 		closeDelayMs: readNumber(env["OMP_HERDR_PANES_CLOSE_DELAY_MS"], DEFAULT_CLOSE_DELAY_MS, isCloseDelay),

@@ -578,3 +578,136 @@ test("a policy change during pane creation is applied when the pane opens", asyn
 	h.pm.setClosePolicy({ autoClose: true, closeDelayMs: 1000, failCloseDelayMs: 5000 });
 	expect(timer(h).ms).toBe(0);
 });
+
+test("nested panes split beside their own parent and stack only with siblings", async () => {
+	const h = harness({ maxPanes: 10, layoutHeights: {
+		"w1:p2": 40, "w1:p3": 40, "w1:p4": 40, "w1:p5": 40, "w1:p6": 40,
+	} });
+	await Promise.all([h.pm.open(file("A"), "A"), h.pm.open(file("B"), "B")]);
+	await h.pm.open(file("A1"), "A1", file("A"));
+	await h.pm.open(file("B1"), "B1", file("B"));
+	await h.pm.open(file("A1a"), "A1a", file("A1"));
+	await h.pm.open(file("A2"), "A2", file("A"));
+	await h.pm.open(file("A1"), "A1 duplicate", file("A"));
+	expect(callsMatching(h, "split ")).toEqual([
+		"split w1:p1 right 0.6", "split w1:p2 down 0.5",
+		"split w1:p2 right 0.6", "split w1:p3 right 0.6",
+		"split w1:p4 right 0.6", "split w1:p4 down 0.5",
+	]);
+	expect(h.pm.size).toBe(6);
+});
+
+test("a manually closed parent removes and closes its whole descendant tree", async () => {
+	const h = harness({ layoutHeights: { "w1:p2": 30, "w1:p3": 30, "w1:p4": 30 } });
+	await h.pm.open(file("A"), "A");
+	await h.pm.open(file("A1"), "A1", file("A"));
+	await h.pm.open(file("A1a"), "A1a", file("A1"));
+	delete h.herdr.layoutHeights["w1:p2"];
+	timer(h).fire();
+	await settle();
+	expect(callsMatching(h, "close ")).toEqual(["close w1:p4", "close w1:p3"]);
+	expect(h.pm.size).toBe(0);
+	await h.pm.open(file("late"), "late", file("A"));
+	expect(callsMatching(h, "split ")).toHaveLength(3);
+});
+
+test("a missing parent is never replaced with the main pane as split target", async () => {
+	const h = harness();
+	await h.pm.open(file("A"), "A");
+	await h.pm.open(file("child"), "child", file("A"));
+	expect(callsMatching(h, "split ")).toEqual(["split w1:p1 right 0.6"]);
+	expect(h.pm.has(file("child"))).toBe(false);
+});
+
+test("terminal control characters in viewer arguments never reach any backend", async () => {
+	const h = harness();
+	await h.pm.open("/tmp/unsafe\ncommand.jsonl", "agent");
+	expect(callsMatching(h, "run ")).toEqual([]);
+	expect(callsMatching(h, "close ")).toEqual(["close w1:p2"]);
+});
+
+test("a late transcript retains the original lifecycle finish time", async () => {
+	const h = harness();
+	h.advance(1500);
+	await h.pm.open(file("late"), "late");
+	h.pm.finish(file("late"), "completed", 1000);
+	expect(timer(h).ms).toBe(500);
+});
+
+test("a parent closed while its child is splitting cannot leave a new viewer behind", async () => {
+	const h = harness({ layoutHeights: { "w1:p2": 30 } });
+	await h.pm.open(file("A"), "A");
+	const started = Promise.withResolvers<void>();
+	const resume = Promise.withResolvers<void>();
+	h.herdr.split = async () => {
+		started.resolve();
+		await resume.promise;
+		return "w1:p3";
+	};
+	const opening = h.pm.open(file("child"), "child", file("A"));
+	await started.promise;
+	delete h.herdr.layoutHeights["w1:p2"];
+	resume.resolve();
+	await opening;
+	expect(callsMatching(h, "run ")).toHaveLength(1);
+	expect(callsMatching(h, "close ")).toEqual(["close w1:p3", "close w1:p2"]);
+	expect(h.pm.size).toBe(0);
+});
+
+test("a later sibling stays beside its parent after an ancestor's sibling split", async () => {
+	const h = harness();
+	const rect = (paneId: string, x: number, y: number, width: number, height: number): LayoutPane =>
+		({ paneId, rect: { x, y, width, height } });
+	let layout = [rect(MAIN_PANE, 0, 0, 120, 80), rect("w1:p2", 121, 0, 79, 80)];
+	h.herdr.layout = async () => layout;
+	await h.pm.open(file("A"), "A");
+	await h.pm.open(file("A1"), "A1", file("A"));
+	layout = [
+		rect(MAIN_PANE, 0, 0, 120, 80),
+		rect("w1:p2", 121, 0, 47, 80),
+		rect("w1:p3", 169, 0, 31, 80),
+	];
+	await h.pm.open(file("B"), "B");
+	layout = [
+		rect(MAIN_PANE, 0, 0, 120, 80),
+		rect("w1:p2", 121, 0, 47, 39),
+		rect("w1:p3", 169, 0, 31, 80),
+		rect("w1:p4", 121, 40, 47, 40),
+	];
+	await h.pm.open(file("A2"), "A2", file("A"));
+	expect(callsMatching(h, "split ")).toEqual([
+		"split w1:p1 right 0.6",
+		"split w1:p2 right 0.6",
+		"split w1:p2 down 0.5",
+		"split w1:p2 right 0.6",
+	]);
+});
+
+test("a root sibling does not split a parent above its existing lower child", async () => {
+	const h = harness();
+	const rect = (paneId: string, x: number, y: number, width: number, height: number): LayoutPane =>
+		({ paneId, rect: { x, y, width, height } });
+	let layout = [rect(MAIN_PANE, 0, 0, 120, 80), rect("w1:p2", 121, 0, 79, 80)];
+	h.herdr.layout = async () => layout;
+	await h.pm.open(file("A"), "A");
+	await h.pm.open(file("A1"), "A1", file("A"));
+	layout = [
+		rect(MAIN_PANE, 0, 0, 120, 80),
+		rect("w1:p2", 121, 0, 47, 80),
+		rect("w1:p3", 169, 0, 31, 80),
+	];
+	await h.pm.open(file("A2"), "A2", file("A"));
+	layout = [
+		rect(MAIN_PANE, 0, 0, 120, 80),
+		rect("w1:p2", 121, 0, 47, 80),
+		rect("w1:p3", 169, 0, 31, 39),
+		rect("w1:p4", 169, 40, 31, 40),
+	];
+	await h.pm.open(file("B"), "B");
+	expect(callsMatching(h, "split ")).toEqual([
+		"split w1:p1 right 0.6",
+		"split w1:p2 right 0.6",
+		"split w1:p3 down 0.5",
+		"split w1:p1 right 0.6",
+	]);
+});

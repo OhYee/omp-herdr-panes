@@ -15,6 +15,7 @@ type Agent = {
 	token: string;
 	clients: Set<Socket>;
 	snapshot?: string;
+	state?: string;
 	pendingEvents: string[];
 	pendingEventBytes: number;
 	droppedEvents: number;
@@ -27,6 +28,7 @@ export class LiveBridge {
 	private readonly directory: string;
 	private readonly server: Server;
 	private readonly agents = new Map<string, Agent>();
+	private readonly aliases = new Map<string, Agent>();
 	private readonly tokens = new Map<string, Agent>();
 	private readonly sockets = new Set<Socket>();
 	readonly ready: Promise<void>;
@@ -69,6 +71,7 @@ export class LiveBridge {
 			clearTimeout(existing.timer);
 			existing.timer = undefined;
 			existing.finished = false;
+			existing.state = undefined;
 			return existing.token;
 		}
 		const agent: Agent = { token: randomBytes(32).toString("hex"), clients: new Set(), pendingEvents: [], pendingEventBytes: 0, droppedEvents: 0, finished: false };
@@ -77,8 +80,15 @@ export class LiveBridge {
 		return agent.token;
 	}
 
+	/** Route a lifecycle id to the token already issued for its session file. */
+	associate(id: string, sessionFile: string): void {
+		const agent = this.agents.get(sessionFile);
+		if (!agent) throw new Error("Live bridge session is not registered");
+		this.aliases.set(id, agent);
+	}
+
 	publish(id: string, frame: unknown): void {
-		const agent = this.agents.get(id);
+		const agent = this.aliases.get(id) ?? this.agents.get(id);
 		if (!agent || this.closing || this.failed) return;
 		let line: string;
 		try {
@@ -98,6 +108,7 @@ export class LiveBridge {
 		if (frame !== null && typeof frame === "object" && "type" in frame) {
 			if (frame.type === "live") agent.snapshot = line;
 			else if (frame.type === "clear") agent.snapshot = undefined;
+			else if (frame.type === "state") agent.state = line;
 			else if (frame.type === "event" && "name" in frame && "text" in frame) {
 				let connected = false;
 				for (const socket of agent.clients) if (!socket.destroyed) { connected = true; break; }
@@ -114,7 +125,7 @@ export class LiveBridge {
 	}
 
 	finish(id: string): void {
-		const agent = this.agents.get(id);
+		const agent = this.aliases.get(id) ?? this.agents.get(id);
 		if (!agent || agent.finished) return;
 		agent.finished = true;
 		if (agent.clients.size === 0) {
@@ -203,6 +214,7 @@ export class LiveBridge {
 			}
 			if (agent.snapshot) this.send(socket, agent.snapshot);
 			else this.send(socket, '{"type":"ready"}\n');
+			if (agent.state) this.send(socket, agent.state);
 		});
 	}
 
@@ -215,10 +227,15 @@ export class LiveBridge {
 		socket.write(line);
 	}
 
-	private release(id: string, agent: Agent): void {
+	private release(_id: string, agent: Agent): void {
 		clearTimeout(agent.timer);
 		for (const socket of agent.clients) socket.destroy();
-		this.agents.delete(id);
+		for (const [key, candidate] of this.agents) {
+			if (candidate === agent) this.agents.delete(key);
+		}
+		for (const [key, candidate] of this.aliases) {
+			if (candidate === agent) this.aliases.delete(key);
+		}
 		this.tokens.delete(agent.token);
 	}
 }

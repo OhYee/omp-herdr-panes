@@ -222,3 +222,45 @@ test("close removes socket directory and is safe during startup or with broken c
 	expect(existsSync(directory)).toBe(false);
 	expect(() => bridge.register("a")).toThrow();
 });
+
+test("a discovered viewer keeps its token when a different lifecycle id arrives", async () => {
+	const bridge = new LiveBridge(() => {});
+	try {
+		const first = bridge.register("/sessions/filename.jsonl");
+		const other = bridge.register("/sessions/other.jsonl");
+		bridge.associate("agent-name", "/sessions/filename.jsonl");
+		bridge.associate("other-agent", "/sessions/other.jsonl");
+		bridge.publish("agent-name", { type: "live", owner: "first" });
+		bridge.publish("other-agent", { type: "live", owner: "other" });
+		expect(bridge.register("/sessions/filename.jsonl")).toBe(first);
+		const firstSocket = await connect(bridge, hello(first));
+		const otherSocket = await connect(bridge, hello(other));
+		expect(await readLine(firstSocket)).toEqual({ type: "live", owner: "first" });
+		expect(await readLine(otherSocket)).toEqual({ type: "live", owner: "other" });
+	} finally { await bridge.close(); }
+});
+
+test("a late viewer receives the completed lifecycle state after connecting", async () => {
+	const bridge = new LiveBridge(() => {});
+	try {
+		const token = bridge.register("/sessions/late.jsonl");
+		bridge.associate("late-agent", "/sessions/late.jsonl");
+		bridge.publish("late-agent", { type: "live", content: [] });
+		bridge.publish("late-agent", { type: "state", status: "completed" });
+		bridge.finish("late-agent");
+		await bridge.ready;
+		const socket = createConnection(bridge.socketPath);
+		const { promise, resolve, reject } = Promise.withResolvers<unknown[]>();
+		let buffer = "";
+		socket.on("error", reject);
+		socket.on("data", (chunk: Buffer) => {
+			buffer += chunk.toString("utf8");
+			const lines = buffer.split("\n");
+			if (lines.length >= 3) resolve(lines.slice(0, 2).map((line) => JSON.parse(line)));
+		});
+		await once(socket, "connect");
+		socket.write(hello(token));
+		expect(await promise).toEqual([{ type: "live", content: [] }, { type: "state", status: "completed" }]);
+		socket.destroy();
+	} finally { await bridge.close(); }
+});

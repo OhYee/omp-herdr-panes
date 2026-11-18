@@ -1,20 +1,21 @@
 /**
- * Pane manager: one stacked Herdr pane per running subagent.
+ * Pane manager: one viewer pane per subagent, grouped to the right of its parent.
  *
- * Every herdr interaction runs on ONE internal promise chain, so a batch of subagents starting at
- * the same moment can never interleave splits. The tracked map (key = the subagent's sessionFile)
- * is mutated synchronously, so a terminal status that arrives before herdr answered is not lost.
- * Nothing here rejects or throws at its caller: herdr failures are logged and skipped, because an
+ * Backend interactions share one promise chain so concurrent splits cannot interleave. The tracked
+ * map (key = the subagent's sessionFile) is mutated synchronously, so a terminal status that arrives
+ * before a split completes is not lost.
+ * Nothing here rejects or throws at its caller: backend failures are logged and skipped, because an
  * exception escaping an extension callback would take down the whole omp session.
  */
 
 import { HerdrError } from "./herdr.ts";
-import type { Herdr, LayoutPane } from "./herdr.ts";
+import type { LayoutPane } from "./herdr.ts";
+import type { PaneBackend } from "./terminal-backend.ts";
 
 export interface PaneManagerConfig {
-	/** Pane running omp ($HERDR_PANE_ID). The stack is created to its right. */
+	/** Pane running omp; the stack is created to its right. */
 	mainPaneId: string;
-	/** Width share kept by the main pane on the first split, e.g. 0.6. */
+	/** Width share kept by the main pane on the first split when supported by the backend. */
 	ratio: number;
 	/** Max simultaneously open subagent panes; extra subagents wait in FIFO order for a slot. */
 	maxPanes: number;
@@ -24,15 +25,20 @@ export interface PaneManagerConfig {
 	closeDelayMs: number;
 	/** Delay between any other (failed, aborted, …) finish() and closing the pane. */
 	failCloseDelayMs: number;
+	/** Reconcile manually closed viewers even when no work is waiting. */
+	monitorPanes?: boolean;
 	/** Shell command typed into a new pane. */
-	viewerCommand(sessionFile: string, label: string): string;
+	viewerCommand(sessionFile: string, label: string, paneId: string): string;
 }
 
 export type Log = (message: string, context?: Record<string, unknown>) => void;
 export type Schedule = (fn: () => void, ms: number) => { cancel(): void };
 
 interface Entry {
+	key: string;
 	label: string;
+	/** Undefined means the original pane, otherwise the key of the parent viewer. */
+	parentKey?: string;
 	paneId?: string;
 	/** Open order, monotonically increasing; breaks height ties when picking the split target. */
 	order: number;
@@ -50,23 +56,23 @@ const STACK_SPLIT_RATIO = 0.5;
 const RECONCILE_DELAY_MS = 1000;
 
 export class PaneManager {
-	readonly #herdr: Herdr;
+	readonly #backend: PaneBackend;
 	readonly #config: PaneManagerConfig;
 	readonly #logger: Log;
 	readonly #schedule: Schedule;
 	readonly #now: () => number;
 	readonly #entries = new Map<string, Entry>();
-	/** Subagents that started while every slot was taken: key → label, in arrival order. */
-	readonly #waiting = new Map<string, string>();
-	/** Tail of the serialized herdr job chain. Never rejects. */
+	/** Subagents waiting for a slot or for their parent to open, in arrival order. */
+	readonly #waiting = new Map<string, { label: string; parentKey?: string }>();
+	/** Tail of the serialized backend job chain. Never rejects. */
 	#queue: Promise<void> = Promise.resolve();
 	#nextOrder = 0;
 	#reconcileTimer?: { cancel(): void };
 	#reconcileGeneration = 0;
 	#enabled = true;
 
-	constructor(herdr: Herdr, config: PaneManagerConfig, log: Log, schedule?: Schedule, now: () => number = Date.now) {
-		this.#herdr = herdr;
+	constructor(backend: PaneBackend, config: PaneManagerConfig, log: Log, schedule?: Schedule, now: () => number = Date.now) {
+		this.#backend = backend;
 		this.#config = config;
 		this.#logger = log;
 		this.#now = now;
@@ -75,13 +81,19 @@ export class PaneManager {
 			defaultSchedule((message, context) => {
 				this.#log(message, context);
 			});
+		if (backend.supportsRatio === false) {
+			this.#log("pane backend does not support configured split ratios; native split sizes will be used");
+		}
+		if (backend.rename === undefined) {
+			this.#log("pane backend does not support pane renaming; the viewer title is set at launch");
+		}
 	}
 
 	/**
-	 * Open a pane for this subagent (key = its sessionFile). Resolves when the herdr calls finished.
-	 * At the pane limit the subagent waits for a free slot. Never rejects.
+	 * Open a pane for this subagent. A parent key names another viewer; without it the parent is
+	 * the original pane. Resolves when queued backend calls finish and never rejects.
 	 */
-	open(key: string, label: string): Promise<void> {
+	open(key: string, label: string, parentKey?: string): Promise<void> {
 		const existing = this.#entries.get(key);
 		if (existing !== undefined) {
 			// A repeated `started` event revives the subagent: drop the pending close, keep its pane.
@@ -96,36 +108,50 @@ export class PaneManager {
 			}
 			return this.#queue;
 		}
-		if (!this.#enabled) return Promise.resolve();
+		if (!this.#enabled || key === parentKey) return Promise.resolve();
 		if (this.#waiting.has(key)) return Promise.resolve();
-		if (this.#entries.size >= this.#config.maxPanes) {
+		if (parentKey !== undefined && !this.#entries.has(parentKey) && !this.#waiting.has(parentKey)) return Promise.resolve();
+		if (this.#entries.size >= this.#config.maxPanes || (parentKey !== undefined && !this.#entries.has(parentKey))) {
 			this.#log("pane limit reached, waiting for a free slot", { key });
-			this.#waiting.set(key, label);
+			this.#waiting.set(key, { label, parentKey });
 			this.#scheduleReconcile();
 			return Promise.resolve();
 		}
-		// Insert before enqueuing, so a finish() arriving while herdr is still working is not lost.
-		const entry: Entry = { label, order: this.#nextOrder, done: false };
+		// Insert before enqueuing, so a finish() arriving while the backend is still working is not lost.
+		const entry: Entry = { key, label, parentKey, order: this.#nextOrder, done: false };
 		this.#nextOrder += 1;
 		this.#entries.set(key, entry);
+		this.#scheduleReconcile();
 		return this.#enqueue(() => this.#openPane(key, entry));
 	}
 
 	/**
-	 * The subagent reached a terminal `status`: mark its pane title ✓/✗ and close it after
+	 * The subagent reached a terminal `status`: mark its pane title when supported and close it after
 	 * closeDelayMs (`completed`) or failCloseDelayMs (anything else). Never throws.
 	 */
-	finish(key: string, status: string): void {
+	finish(key: string, status: string, finishedAt = this.#now()): void {
 		if (this.#waiting.delete(key)) {
-			if (this.#waiting.size === 0) this.#cancelReconcile();
+			const removed = new Set([key]);
+			let changed = true;
+			while (changed) {
+				changed = false;
+				for (const [child, request] of this.#waiting) {
+					if (request.parentKey !== undefined && removed.has(request.parentKey)) {
+						this.#waiting.delete(child);
+						removed.add(child);
+						changed = true;
+					}
+				}
+			}
+			if (!this.#needsReconcile()) this.#cancelReconcile();
 			return;
 		}
 		const entry = this.#entries.get(key);
 		if (entry === undefined) return;
-		if (!entry.done) entry.finishedAt = this.#now();
+		if (!entry.done) entry.finishedAt = finishedAt;
 		entry.done = true;
 		entry.status = status;
-		// No pane yet: open's job applies the title and schedules the close once the split returns.
+		// No pane yet: open's job applies the title when available and schedules close after split.
 		const paneId = entry.paneId;
 		if (paneId === undefined) return;
 		void this.#enqueue(() => this.#rename(key, paneId, entry));
@@ -143,7 +169,7 @@ export class PaneManager {
 			entry.closeGeneration = (entry.closeGeneration ?? 0) + 1;
 			if (entry.paneId !== undefined) this.#scheduleClose(key, entry);
 		}
-		if (policy.autoClose === false) this.#scheduleReconcile();
+		if (this.#needsReconcile()) this.#scheduleReconcile();
 		else this.#cancelReconcile();
 	}
 
@@ -152,12 +178,16 @@ export class PaneManager {
 		this.#enabled = enabled;
 		if (!enabled) {
 			this.#waiting.clear();
-			this.#cancelReconcile();
+			if (!this.#needsReconcile()) this.#cancelReconcile();
 		}
 	}
 
 	has(key: string): boolean {
 		return this.#entries.has(key);
+	}
+
+	isWaiting(key: string): boolean {
+		return this.#waiting.has(key);
 	}
 
 	/** Close every pane now and cancel pending timers. Never rejects. */
@@ -173,7 +203,7 @@ export class PaneManager {
 				// Set late by an open job queued ahead of this one, hence read at run time.
 				const paneId = entry.paneId;
 				if (paneId === undefined) continue;
-				await this.#closePane(paneId, key);
+				if (await this.#closePane(paneId, key)) entry.paneId = undefined;
 			}
 		});
 	}
@@ -184,7 +214,7 @@ export class PaneManager {
 	}
 
 	/**
-	 * Appends a job to the serialized herdr chain. Jobs run strictly one after another; a failing
+	 * Appends a job to the serialized backend chain. Jobs run strictly one after another; a failing
 	 * job logs and the chain continues, so one broken pane cannot stall the others.
 	 */
 	#enqueue(job: () => Promise<void>): Promise<void> {
@@ -192,7 +222,7 @@ export class PaneManager {
 			try {
 				await job();
 			} catch (error) {
-				this.#log("herdr job failed", { error: describeError(error) });
+				this.#log("pane backend job failed", { error: describeError(error) });
 			}
 		});
 		this.#queue = queued;
@@ -201,53 +231,119 @@ export class PaneManager {
 
 	/** The queued half of open(): pick a split target, create the pane, start the viewer. */
 	async #openPane(key: string, entry: Entry): Promise<void> {
+		if (entry.parentKey !== undefined && this.#entries.get(key) !== entry) return;
 		let paneId: string;
 		try {
-			paneId = await this.#splitFor(key);
+			paneId = await this.#splitFor(key, entry);
 		} catch (error) {
 			this.#log("pane split failed", { key, error: describeError(error) });
 			if (this.#entries.get(key) === entry) {
-				this.#entries.delete(key);
+				await this.#removeSubtree(key);
 				this.#promote();
 			}
 			return;
 		}
 		entry.paneId = paneId;
-		// Titled at run time: finish() may already have set the ✓/✗ status.
+		if (entry.parentKey !== undefined && this.#entries.get(key) !== entry) return;
+		if (entry.parentKey !== undefined) {
+			let parentPresent: boolean;
+			try {
+				const parentPane = this.#entries.get(entry.parentKey)?.paneId;
+				parentPresent = parentPane !== undefined && (await this.#backend.layout(this.#config.mainPaneId))
+					.some((pane) => pane.paneId === parentPane);
+			} catch (error) {
+				this.#log("pane layout failed", { key, error: describeError(error) });
+				if (this.#entries.get(key) === entry) {
+					await this.#removeSubtree(key);
+					this.#promote();
+				}
+				return;
+			}
+			if (this.#entries.get(key) !== entry) return;
+			if (!parentPresent) {
+				await this.#removeSubtree(entry.parentKey);
+				this.#promote();
+				return;
+			}
+		}
 		await this.#rename(key, paneId, entry);
+		if (entry.parentKey !== undefined && this.#entries.get(key) !== entry) return;
 		try {
-			await this.#herdr.run(paneId, this.#config.viewerCommand(key, entry.label));
+			const command = this.#config.viewerCommand(key, entry.label, paneId);
+			if (/[\u0000-\u001f\u007f-\u009f]/u.test(command)) throw new Error("viewer command contains terminal control characters");
+			await this.#backend.run(paneId, command);
 		} catch (error) {
 			this.#log("pane run failed", { key, paneId, error: describeError(error) });
+			if (this.#entries.get(key) === entry) {
+				await this.#removeSubtree(key);
+				this.#promote();
+			}
+			return;
 		}
-		// finish() may have arrived while herdr was busy: schedule the close it could not.
+		// finish() may have arrived while the backend was busy: schedule the close it could not.
 		if (entry.done && this.#entries.get(key) === entry) this.#scheduleClose(key, entry);
 	}
 
-	/** Splits the tallest stacked pane downwards, or the main pane to the right when there is none. */
-	async #splitFor(key: string): Promise<string> {
-		const stacked = this.#stackedEntries();
+	/** Each parent gets its own column; only its direct children can be stacked together. */
+	async #splitFor(key: string, entry: Entry): Promise<string> {
+		const parent = entry.parentKey === undefined ? this.#config.mainPaneId : this.#entries.get(entry.parentKey)?.paneId;
+		if (parent === undefined) throw new Error("parent viewer is no longer available");
+		const siblings = this.#stackedEntries(entry.parentKey);
 		let target: string | undefined;
-		if (stacked.length > 0) {
+		if (siblings.length > 0 || entry.parentKey !== undefined) {
 			try {
-				target = tallestPaneId(await this.#herdr.layout(this.#config.mainPaneId), stacked);
+				const panes = await this.#backend.layout(this.#config.mainPaneId);
+				const parentPane = panes.find((pane) => pane.paneId === parent);
+				if (entry.parentKey !== undefined && !parentPane) {
+					throw new Error("parent viewer pane is no longer present");
+				}
+				let candidates = siblings;
+				if (entry.parentKey !== undefined && parentPane) {
+					if (this.#backend.supportsLayoutPosition === false) candidates = [];
+					else candidates = siblings.filter((sibling) => {
+						const pane = panes.find((item) => item.paneId === sibling.paneId);
+						return pane !== undefined && pane.rect.y >= parentPane.rect.y
+							&& pane.rect.y + pane.rect.height <= parentPane.rect.y + parentPane.rect.height;
+					});
+				}
+				candidates = candidates.filter((candidate) => this.#canSplitDown(candidate, panes));
+				target = tallestPaneId(panes, candidates);
 			} catch (error) {
+				if (entry.parentKey !== undefined) throw error;
 				this.#log("pane layout failed", { key, error: describeError(error) });
 			}
 		}
-		// Nothing stacked yet, layout broken, or the candidate was closed by hand: rebuild the
-		// column with a fresh split off the main pane.
-		if (target === undefined) {
-			return this.#herdr.split(this.#config.mainPaneId, "right", this.#config.ratio);
-		}
-		return this.#herdr.split(target, "down", STACK_SPLIT_RATIO);
+		return target === undefined
+			? this.#split(parent, "right", this.#config.ratio)
+			: this.#split(target, "down", STACK_SPLIT_RATIO);
 	}
 
-	/** Tracked entries that already own a pane, i.e. potential split targets. */
-	#stackedEntries(): Entry[] {
+	/** A downward split must not move a parent wholly above any of its existing children. */
+	#canSplitDown(entry: Entry, panes: LayoutPane[]): boolean {
+		const children = [...this.#entries.values()].filter((child) => child.parentKey === entry.key && child.paneId !== undefined);
+		if (children.length === 0) return true;
+		if (this.#backend.supportsLayoutPosition === false) return false;
+		const target = panes.find((pane) => pane.paneId === entry.paneId);
+		if (!target) return false;
+		const top = target.rect.y;
+		const bottom = top + Math.floor((target.rect.height - 1) * STACK_SPLIT_RATIO);
+		for (const child of children) {
+			const pane = panes.find((item) => item.paneId === child.paneId);
+			if (pane && (pane.rect.y >= bottom || pane.rect.y + pane.rect.height <= top)) return false;
+		}
+		return true;
+	}
+
+	#split(target: string, direction: "right" | "down", ratio: number): Promise<string> {
+		if (this.#backend.supportsRatio === false) return this.#backend.split(target, direction);
+		return this.#backend.split(target, direction, ratio);
+	}
+
+	/** Only siblings, never a different parent's descendants, are valid stack targets. */
+	#stackedEntries(parentKey: string | undefined): Entry[] {
 		const stacked: Entry[] = [];
 		for (const entry of this.#entries.values()) {
-			if (entry.paneId !== undefined) stacked.push(entry);
+			if (entry.parentKey === parentKey && entry.paneId !== undefined) stacked.push(entry);
 		}
 		return stacked;
 	}
@@ -270,34 +366,41 @@ export class PaneManager {
 		entry.timer = timer;
 	}
 
-	/** Opens panes for waiting subagents while slots are free, oldest first. */
+	/** Opens eligible waiting subagents while slots are free, preserving arrival order. */
 	#promote(): void {
-		for (const [key, label] of this.#waiting) {
-			if (this.#entries.size >= this.#config.maxPanes) return;
+		for (const [key, request] of this.#waiting) {
+			if (this.#entries.size >= this.#config.maxPanes) break;
+			if (request.parentKey !== undefined && !this.#entries.has(request.parentKey)) continue;
 			this.#waiting.delete(key);
-			void this.open(key, label);
+			void this.open(key, request.label, request.parentKey);
 		}
-		if (this.#waiting.size === 0) this.#cancelReconcile();
+		if (this.#needsReconcile()) this.#scheduleReconcile();
+		else this.#cancelReconcile();
+	}
+
+	#needsReconcile(): boolean {
+		return (this.#config.monitorPanes === true && this.#entries.size > 0)
+			|| (this.#config.autoClose === false && this.#waiting.size > 0)
+			|| [...this.#entries.values()].some((entry) => entry.parentKey !== undefined);
 	}
 
 	#scheduleReconcile(): void {
-		if (this.#config.autoClose !== false || this.#waiting.size === 0 || this.#reconcileTimer !== undefined) return;
+		if (!this.#needsReconcile() || this.#reconcileTimer !== undefined) return;
 		const generation = this.#reconcileGeneration;
 		const timer = this.#schedule(() => {
 			if (this.#reconcileTimer !== timer) return;
 			if (generation !== this.#reconcileGeneration) return;
 			this.#reconcileTimer = undefined;
 			void this.#enqueue(async () => {
-				if (generation !== this.#reconcileGeneration || this.#waiting.size === 0) return;
+				if (generation !== this.#reconcileGeneration || !this.#needsReconcile()) return;
 				const candidates = [...this.#entries];
 				try {
-					const panes = await this.#herdr.layout(this.#config.mainPaneId);
-					if (generation !== this.#reconcileGeneration || this.#waiting.size === 0) return;
+					const panes = await this.#backend.layout(this.#config.mainPaneId);
+					if (generation !== this.#reconcileGeneration || !this.#needsReconcile()) return;
 					const present = new Set(panes.map((pane) => pane.paneId));
 					for (const [key, entry] of candidates) {
 						if (entry.paneId !== undefined && !present.has(entry.paneId) && this.#entries.get(key) === entry) {
-							this.#cancelTimer(entry);
-							this.#entries.delete(key);
+							await this.#removeSubtree(key, entry.paneId);
 						}
 					}
 					this.#promote();
@@ -316,11 +419,12 @@ export class PaneManager {
 		this.#reconcileTimer = undefined;
 	}
 
-	/** Sets the pane title: the label, prefixed with ✓/✗ once the subagent finished. */
+	/** Sets the pane title when the backend supports per-pane titles. */
 	async #rename(key: string, paneId: string, entry: Entry): Promise<void> {
+		if (this.#backend.rename === undefined) return;
 		const mark = entry.status === undefined ? "" : entry.status === "completed" ? "✓ " : "✗ ";
 		try {
-			await this.#herdr.rename(paneId, `${mark}${entry.label}`);
+			await this.#backend.rename(paneId, `${mark}${entry.label}`);
 		} catch (error) {
 			this.#log("pane rename failed", { key, paneId, error: describeError(error) });
 		}
@@ -333,19 +437,52 @@ export class PaneManager {
 			if (this.#entries.get(key) !== entry || !entry.done || entry.closeGeneration !== generation) return;
 			const paneId = entry.paneId;
 			if (paneId === undefined) return;
-			// Forgotten before awaiting: a revive during the close gets a fresh pane of its own.
-			this.#entries.delete(key);
+			await this.#removeSubtree(key);
 			this.#promote();
-			await this.#closePane(paneId, key);
 		});
 	}
+	/** Forget a parent and its descendants before closing, so late opens cannot attach to it. */
+	async #removeSubtree(root: string, missingPane?: string): Promise<void> {
+		const removed = new Set([root]);
+		let changed = true;
+		while (changed) {
+			changed = false;
+			for (const [key, entry] of this.#entries) {
+				if (entry.parentKey !== undefined && removed.has(entry.parentKey) && !removed.has(key)) {
+					removed.add(key);
+					changed = true;
+				}
+			}
+			for (const [key, request] of this.#waiting) {
+				if (request.parentKey !== undefined && removed.has(request.parentKey) && !removed.has(key)) {
+					removed.add(key);
+					changed = true;
+				}
+			}
+		}
+		const closing: Array<[string, Entry]> = [];
+		for (const key of removed) {
+			this.#waiting.delete(key);
+			const entry = this.#entries.get(key);
+			if (!entry) continue;
+			this.#entries.delete(key);
+			this.#cancelTimer(entry);
+			closing.push([key, entry]);
+		}
+		for (const [key, entry] of closing.reverse()) {
+			if (entry.paneId === missingPane) entry.paneId = undefined;
+			else if (entry.paneId !== undefined && await this.#closePane(entry.paneId, key)) entry.paneId = undefined;
+		}
+	}
 
-	async #closePane(paneId: string, key: string): Promise<void> {
+	async #closePane(paneId: string, key: string): Promise<boolean> {
 		try {
-			await this.#herdr.close(paneId);
+			await this.#backend.close(paneId);
+			return true;
 		} catch (error) {
-			if (error instanceof HerdrError && error.code === "pane_not_found") return;
+			if (error instanceof HerdrError && error.code === "pane_not_found") return true;
 			this.#log("pane close failed", { key, paneId, error: describeError(error) });
+			return false;
 		}
 	}
 

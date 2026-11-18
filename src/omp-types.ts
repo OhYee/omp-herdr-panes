@@ -25,6 +25,10 @@ export interface ExtensionAPI {
 		handler: (event: unknown, ctx: { sessionManager: { getSessionFile(): string | undefined } }) => void,
 	): void;
 	on(
+		event: "session_start" | "session_switch" | "before_agent_start" | "agent_start",
+		handler: (event: unknown, ctx: { sessionManager: { getSessionFile(): string | undefined } }) => void,
+	): void;
+	on(
 		event: "session_shutdown",
 		handler: (event: unknown, ctx: unknown) => void | Promise<void>,
 	): void;

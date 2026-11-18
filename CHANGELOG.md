@@ -13,6 +13,7 @@ All notable changes to this project are documented here. The format follows
 - Stream subagent thinking, text and tool calls from live events while retaining JSONL as the
   durable transcript.
 - Open a saved session by ID, ID prefix or JSONL path.
+- Recursively discover child sessions for both plugin-created panes and independent interactive viewers.
 - `OMP_HERDR_PANES_AUTO_CLOSE=0` keeps finished panes open until manually closed or omp exits.
 - `t` toggles all thinking blocks and sets the default for new thinking.
 - `/herdr-panes` controls pane creation and automatic close delays in the current OMP process.
@@ -31,6 +32,7 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - Run read-only viewer panes with standalone Bun so Herdr does not list them as OMP agents.
+- Place each subagent beside its own parent view, stacking siblings where the layout permits.
 - Honor configured close delays even when other subagents are waiting for a pane.
 - Merge consecutive thinking and fold consecutive tool calls with their results into counted groups.
 - Pair tool calls and results by call ID in one expandable item, including out-of-order results.
@@ -40,7 +42,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- Start the live-event socket only when a subagent starts, so plugin installation validation can exit.
+- Start the live-event socket lazily, so plugin installation validation can exit.
+- Avoid duplicate recursive viewers and close descendants when their parent pane disappears.
+- Retry active subagent panes after re-enabling or a transient split failure; ignore saved session branches and inactive plugin history.
 
 ## [0.2.0] - 2026-10-04
 

@@ -10,6 +10,12 @@
 
 import { watch } from "node:fs";
 import { createConnection, type Socket } from "node:net";
+import { fileURLToPath } from "node:url";
+import { readConfig, shellQuote } from "./config.ts";
+import { createHerdrCli } from "./herdr.ts";
+import { PaneManager } from "./pane-manager.ts";
+import { SessionTree } from "./session-tree.ts";
+import { createTernBackend, createTmuxBackend, detectPaneContext, type PaneBackend } from "./terminal-backend.ts";
 import { createLineSplitter } from "./line-splitter.ts";
 import { type SessionTotals, recordOf, renderEntry, sanitize, usageOf } from "./render.ts";
 import { TranscriptModel } from "./tui-model.ts";
@@ -40,6 +46,8 @@ interface ViewerOptions {
 	socketPath: string | null;
 	token: string | null;
 	streamUnavailable: boolean;
+	managed: boolean;
+	paneId: string | null;
 }
 
 /** Per-session accounting shared between the tail loop and the renderer. */
@@ -63,6 +71,8 @@ function parseViewerArgs(argv: readonly string[]): ViewerOptions | null {
 	let socketPath: string | null = null;
 	let token: string | null = null;
 	let streamUnavailable = false;
+	let managed = false;
+	let paneId: string | null = null;
 	let sessionDir: string | undefined;
 
 	for (let index = 0; index < argv.length; index += 1) {
@@ -102,6 +112,15 @@ function parseViewerArgs(argv: readonly string[]): ViewerOptions | null {
 			streamUnavailable = true;
 			continue;
 		}
+		if (arg === "--managed") {
+			managed = true;
+			continue;
+		}
+		if (arg === "--pane-id") {
+			paneId = argv[index + 1] ?? null;
+			if (paneId !== null) index += 1;
+			continue;
+		}
 		if (arg === "--socket" || arg === "--token") {
 			const value = argv[index + 1];
 			if (value !== undefined) {
@@ -117,7 +136,7 @@ function parseViewerArgs(argv: readonly string[]): ViewerOptions | null {
 	}
 
 	if (sessionFile === null || sessionFile.length === 0) return null;
-	return { sessionFile, sessionDir, title: title ?? basenameWithoutJsonl(sessionFile), thinkingLines, parentPid, socketPath, token, streamUnavailable };
+	return { sessionFile, sessionDir, title: title ?? basenameWithoutJsonl(sessionFile), thinkingLines, parentPid, socketPath, token, streamUnavailable, managed, paneId };
 }
 
 /** Last path segment, with a `.jsonl` suffix removed. */
@@ -306,23 +325,20 @@ async function startTailLoop(options: ViewerOptions, model?: TranscriptModel, tu
  * Watch the omp process that spawned this viewer and exit once it is gone, so a SIGKILLed omp
  * cannot leave orphaned viewers behind. `EPERM` (process exists, different user) counts as alive.
  */
-function watchParent(pid: number): void {
+function watchParent(pid: number, quit: () => void): void {
 	setInterval(() => {
 		try {
 			process.kill(pid, 0);
 		} catch (error) {
-			if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ESRCH") process.exit(0);
+			if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ESRCH") quit();
 		}
 	}, PARENT_CHECK_INTERVAL_MS);
 }
 
 /** SIGTERM/SIGHUP/SIGINT end the viewer cleanly; every other failure is reported and survived. */
-function installProcessHandlers(tui?: ViewerTui): void {
+function installProcessHandlers(quit: () => void): void {
 	for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"] as const) {
-		process.on(signal, () => {
-			tui?.stop();
-			process.exit(0);
-		});
+		process.on(signal, quit);
 	}
 	process.on("uncaughtException", (error: Error) => {
 		reportProblem("unexpected error", error);
@@ -391,9 +407,71 @@ async function main(): Promise<void> {
 	const model = interactive ? new TranscriptModel() : undefined;
 	if (model && options.streamUnavailable) model.streamStatus = "unavailable";
 	if (model && !options.socketPath && !options.streamUnavailable) model.status = "history";
-	const tui = model ? new ViewerTui(model, options.title, options.sessionFile, () => process.exit(0)) : undefined;
-	installProcessHandlers(tui);
-	if (options.parentPid !== null) watchParent(options.parentPid);
+	let children: SessionTree | undefined;
+	let panes: PaneManager | undefined;
+	let stopping = false;
+	const quit = (): void => {
+		if (stopping) return;
+		stopping = true;
+		children?.close();
+		tui?.stop();
+		void (async () => {
+			await panes?.closeAll();
+			process.exit(0);
+		})();
+	};
+	const tui = model ? new ViewerTui(model, options.title, options.sessionFile, quit) : undefined;
+	installProcessHandlers(quit);
+	if (options.parentPid !== null) {
+		let handlingParentExit = false;
+		watchParent(options.parentPid, () => {
+			if (handlingParentExit) return;
+			handlingParentExit = true;
+			void (async () => {
+				try {
+					const context = detectPaneContext(process.env);
+					if (options.managed && options.paneId && context?.paneId === options.paneId) {
+						if (context.backend === "tern") {
+							await createTernBackend(context.paneId).closeCurrent?.();
+						} else if (context.backend === "tmux") {
+							await createTmuxBackend(context.paneId, context.tmuxEnv).closeCurrent?.();
+						} else if (context.backend === "herdr") {
+							const backend = createHerdrCli();
+							if ((await backend.layout(context.paneId)).some((pane) => pane.paneId === context.paneId)) await backend.close(context.paneId);
+						}
+					}
+				} catch (error) {
+					reportProblem("orphan pane cleanup failed", error);
+				} finally {
+					quit();
+				}
+			})();
+		});
+	}
+	if (interactive && !options.managed) {
+		const config = readConfig(process.env);
+		const context = detectPaneContext(process.env);
+		const bun = Bun.which("bun");
+		if (config && context && bun) {
+			try {
+				let backend: PaneBackend;
+				if (context.backend === "herdr") backend = createHerdrCli();
+				else if (context.backend === "tern") backend = createTernBackend(context.paneId);
+				else if (context.backend === "tmux") backend = createTmuxBackend(context.paneId, context.tmuxEnv);
+				else throw new Error("unsupported terminal pane");
+				const viewer = fileURLToPath(import.meta.url);
+				panes = new PaneManager(backend, {
+					...config,
+					monitorPanes: true,
+					viewerCommand: (file, label, paneId) => ` exec ${shellQuote(bun)} ${shellQuote(viewer)} ${shellQuote(file)} --title ${shellQuote(label)} --parent-pid ${process.pid} --managed --pane-id ${shellQuote(paneId)}`,
+				}, (message, details) => reportProblem(message, details));
+				children = new SessionTree(options.sessionFile, panes, (error) => reportProblem("session discovery failed", error));
+				children.start();
+			} catch (error) {
+				reportProblem("pane backend unavailable", error);
+			}
+		}
+	}
 	if (tui) tui.start();
 	else process.stdout.write(`${CLEAR_SCREEN}${BOLD}${sanitize(options.title).replace(/\n/gu, " ")}${RESET}\nFile: ${sanitize(options.sessionFile).replace(/\r?\n/gu, " ")}\n\n`);
 	await waitForTranscript(options.sessionFile);
